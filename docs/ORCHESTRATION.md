@@ -1,8 +1,10 @@
 # Orchestration
 
-## Request Flow
+## Live Adapter
 
-```text
+`platform/pi/kernel-adapter.ts` is the live bridge around Pi. It creates tasks from `before_agent_start`, derives and validates a one-step plan from a model-requested tool call, evaluates policy before Pi executes the tool, observes `tool_execution_end`, validates the result, and finalizes the task at `agent_end`. Pi remains the only agent loop and tool runtime.
+
+The first planner is observation-driven. A model-agnostic `StructuredModelPlanner` is also implemented for validated structured planning output; malformed output becomes a typed planning error.
 User request
   -> Pi before_agent_start
   -> task creation

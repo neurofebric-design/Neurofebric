@@ -6,7 +6,7 @@ This project is a general-purpose analysis and automation platform built on Pi. 
 
 The existing Python harness remains a separate legacy/reference implementation for now. It is not embedded in the Pi runtime and will not be duplicated in the orchestrator.
 
-The typed kernel contracts are documented in [CORE_KERNEL.md](CORE_KERNEL.md), with orchestration details in [ORCHESTRATION.md](ORCHESTRATION.md), tool rules in [TOOL_SPEC.md](TOOL_SPEC.md), and security constraints in [SECURITY.md](SECURITY.md).
+The first live adapter is in `platform/pi/kernel-adapter.ts`. It observes Pi lifecycle events, maps Pi tool metadata into the kernel registry, creates tasks, validates one-step plans derived from model-requested tool calls, gates tools through policy, validates Pi results, and persists structured trace events. See [PI_INTEGRATION.md](PI_INTEGRATION.md).
 
 ## Runtime Boundaries
 

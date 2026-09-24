@@ -66,7 +66,7 @@ node --test platform/*.test.mjs
 node --experimental-strip-types --test platform/core/*.test.ts
 ```
 
-The first command tests the existing JavaScript platform helpers. The second command tests the typed core contracts, state machine, plan validation, policy, execution records, recovery, context, memory, limits, and registries. All tests use deterministic fakes and do not require credentials or real model calls.
+The first live kernel path is covered by `platform/pi/kernel-adapter.test.ts` and the domain-neutral smoke test `platform/pi/smoke.test.ts`. The smoke test exercises task creation, planning, plan validation, policy approval, execution observation, validation, provenance, and completion without a real model or credentials.
 
 ## Existing Python Harness
 

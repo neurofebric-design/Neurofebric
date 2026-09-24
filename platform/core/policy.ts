@@ -21,6 +21,9 @@ export class DefaultPolicy {
       return { decision: "REQUIRE_APPROVAL", reason: "Write operations require explicit approval" };
     }
     if (request.tool.riskLevel === "READ_ONLY") return { decision: "ALLOW" };
+    if (request.tool.riskLevel === "CONTROLLED") {
+      return { decision: "REQUIRE_APPROVAL", reason: "Controlled operations require explicit approval" };
+    }
     return { decision: "DENY", reason: "No policy rule allows this operation" };
   }
 

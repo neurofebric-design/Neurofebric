@@ -15,7 +15,9 @@ Tests use deterministic fakes and do not require real LLM calls, credentials, da
 
 ```bash
 node --test platform/*.test.mjs
-node --experimental-strip-types --test platform/core/*.test.ts
+node --experimental-strip-types --test platform/core/*.test.ts platform/pi/*.test.ts
 ```
+
+The second command includes the live adapter, structured planner, and domain-neutral kernel smoke test.
 
 Every new core contract requires a focused test. Invariant tests should cover illegal transitions, invalid plans, retry/replan limits, cancellation, policy bypass attempts, and preservation of successful work.
