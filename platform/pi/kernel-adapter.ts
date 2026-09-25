@@ -53,6 +53,7 @@ export class KernelAdapter {
   private task?: Task;
   private plan?: Plan;
   private lastValidation?: ValidationResult;
+  private readonly observedExecutionIds = new Set<string>();
 
   constructor(options: KernelAdapterOptions = {}) {
     this.tools = new ToolRegistry();
@@ -90,6 +91,8 @@ export class KernelAdapter {
     const task = createTask({ taskId: randomUUID(), userRequest, objective, constraints });
     this.task = task;
     this.plan = undefined;
+    this.lastValidation = undefined;
+    this.observedExecutionIds.clear();
     await this.events.emit(event("TASK_CREATED", task.taskId, { objective: task.objective }));
     this.task = transitionTask(this.task, "UNDERSTANDING");
     await this.events.emit(event("TASK_STARTED", task.taskId));
@@ -101,6 +104,12 @@ export class KernelAdapter {
   async planToolCall(toolName: string, input: unknown, inputMetadata?: Record<string, unknown>): Promise<ToolCallDecision> {
     if (!this.task) throw new Error("No active task");
     // Pi has already selected the operation; the kernel validates it before Pi executes it.
+    // A completed validation within the same Pi user turn allows planning
+    // of the next tool. Recovery and terminal states remain blocked.
+    if (this.task.status === "VALIDATING" && this.lastValidation?.status === "VALID") {
+      this.task = transitionTask(this.task, "PLANNING");
+    }
+
     if (this.task.status !== "PLANNING") {
       throw new CoreError("TASK_ERROR", `Task cannot plan from state ${this.task.status}`, { taskId: this.task.taskId });
     }
@@ -156,6 +165,44 @@ export class KernelAdapter {
 
   async observeToolResult(result: ToolResult, error?: unknown): Promise<ValidationResult> {
     if (!this.task || !this.plan?.steps[0]) throw new Error("No active tool step");
+    const executionId = result.execution.executionId;
+
+    // Pi can emit duplicate or late tool_execution_end events.
+    // Only the active EXECUTING result may advance to OBSERVING.
+    if (this.observedExecutionIds.has(executionId)) {
+      await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, {
+        executionId,
+        reason: "duplicate_execution_result",
+      }));
+      return {
+        status: "INCONCLUSIVE",
+        validator: "pi-result-dedup",
+        message: "Duplicate tool result ignored",
+      };
+    }
+
+    if (
+      result.execution.taskId !== this.task.taskId ||
+      result.execution.stepId !== this.task.currentStep ||
+      this.task.status !== "EXECUTING"
+    ) {
+      await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, {
+        executionId,
+        reason: "stale_or_out_of_order_result",
+        taskStatus: this.task.status,
+        currentStep: this.task.currentStep,
+        resultTaskId: result.execution.taskId,
+        resultStep: result.execution.stepId,
+      }));
+      return {
+        status: "INCONCLUSIVE",
+        validator: "pi-result-order",
+        message: "Late or out-of-order tool result ignored",
+      };
+    }
+
+    this.observedExecutionIds.add(executionId);
+
     // A successful tool call is not a successful task until validation passes.
     this.task = transitionTask(this.task, "OBSERVING");
     this.task = { ...this.task, observations: [...this.task.observations, result.success ? "Tool completed" : "Tool failed"] };
@@ -169,9 +216,66 @@ export class KernelAdapter {
     await this.events.emit(event(validation.status === "VALID" ? "VALIDATION_COMPLETED" : "VALIDATION_FAILED", this.task.taskId, validation as unknown as Record<string, unknown>));
     if (validation.status !== "VALID") {
       this.task = transitionTask(this.task, "RECOVERING");
-      const strategy = chooseRecovery({ failure: classifyFailure(error), limits: this.limits, retryCount: this.task.retryCount, replanCount: this.task.replanCount, depth: 0, idempotency: this.tools.get(result.execution.tool).idempotency });
-      await this.events.emit(event("RECOVERY_STARTED", this.task.taskId, { strategy }));
+
+      const tool = this.tools.get(result.execution.tool);
+      const failure = classifyFailure(error);
+
+      const strategy = chooseRecovery({
+        failure,
+        limits: this.limits,
+        retryCount: this.task.retryCount,
+        replanCount: this.task.replanCount,
+        depth: this.recoveryDepth,
+        idempotency: tool.idempotency,
+      });
+
+      this.recoveryDepth += 1;
+
+      await this.events.emit(event("RECOVERY_STARTED", this.task.taskId, {
+        strategy,
+        failure,
+        recoveryDepth: this.recoveryDepth,
+      }));
+
+      switch (strategy) {
+        case "RETRY":
+          this.task = {
+            ...this.task,
+            retryCount: this.task.retryCount + 1,
+          };
+
+          this.task = transitionTask(this.task, "RETRYING");
+          this.task = transitionTask(this.task, "PLANNING");
+          break;
+
+        case "REPLAN":
+          this.task = {
+            ...this.task,
+            replanCount: this.task.replanCount + 1,
+          };
+
+          this.task = transitionTask(this.task, "REPLANNING");
+          this.task = transitionTask(this.task, "PLANNING");
+          break;
+
+        case "ESCALATE":
+          this.task = transitionTask(this.task, "ESCALATED");
+          break;
+
+        case "TERMINATE":
+        default:
+          this.task = transitionTask(this.task, "FAILED");
+
+          await this.events.emit(event("TASK_FAILED", this.task.taskId, {
+            reason: "Recovery budget exhausted or no safe recovery strategy remains",
+            strategy,
+          }));
+          break;
+      }
+    } else {
+      this.recoveryDepth = 0;
     }
+
     return validation;
   }
 

@@ -72,9 +72,15 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
 
   pi.on("tool_call", async (event, ctx) => {
     if (!kernel.currentTask) return undefined;
-    // Do not let a recovering task silently start unrelated work in the same model turn.
-    if (kernel.currentTask.status !== "PLANNING") {
-      return { block: true, reason: `Task is ${kernel.currentTask.status}; no further tool execution is allowed without replanning` };
+    // A successful validation may be followed by another planned tool
+    // within the same Pi user turn. Recovery and terminal states remain blocked.
+    const status = kernel.currentTask.status;
+
+    if (status !== "PLANNING" && status !== "VALIDATING") {
+      return {
+        block: true,
+        reason: `Task is ${status}; no further tool execution is allowed without replanning`,
+      };
     }
     const approval = new PiApprovalProvider(ctx.hasUI, async (prompt) => {
       return (await ctx.ui.confirm("Neurofebric policy approval", prompt)) === true;

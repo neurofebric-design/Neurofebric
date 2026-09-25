@@ -33,7 +33,7 @@ test("live adapter creates a task, plans a Pi tool call, and completes after val
   const planned = await adapter.evaluateToolCall("read", "read", { path: "README.md" });
   assert.equal(planned.decision.decision, "ALLOW");
   assert.equal(planned.task?.status, "EXECUTING");
-  const validation = await adapter.observeToolResult(result(task.taskId, "pi-step"));
+  const validation = await adapter.observeToolResult(result(task.taskId, adapter.currentTask?.currentStep ?? "unknown"));
   assert.equal(validation.status, "VALID");
   const completed = await adapter.finishTask({ answer: "done" });
   assert.equal(completed.status, "COMPLETED");
@@ -64,8 +64,9 @@ test("tool failure enters recovery and emits a failure event", async () => {
   adapter.registerTools([toolDescriptorFromPi({ name: "read", description: "Read a file" })]);
   const task = await adapter.beginTask("Read a file", "Read a file");
   await adapter.evaluateToolCall("read", "read", { path: "x" });
-  const validation = await adapter.observeToolResult(result(task.taskId, "pi-step", false), new Error("read failed"));
+  const validation = await adapter.observeToolResult(result(task.taskId, adapter.currentTask?.currentStep ?? "unknown", false), new Error("read failed"));
   assert.equal(validation.status, "INVALID");
-  assert.equal(adapter.currentTask?.status, "RECOVERING");
+  assert.equal(adapter.currentTask?.status, "PLANNING");
+  assert.equal(adapter.currentTask?.replanCount, 1);
   assert.ok(adapter.recentEvents().some((event) => event.type === "RECOVERY_STARTED"));
 });
