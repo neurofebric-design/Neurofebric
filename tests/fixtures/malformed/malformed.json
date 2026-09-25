@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "2.1",
+  "exportedAt": "2024-11-03T04:12:55Z",
+  "region": "eu-west-1",
+  "records": [
+    { "id": "r-001", "amount": 1042, "currency": "EUR", "status": "settled" },
+    { "id": "r-002", "amount": 88, "currency": "EUR", "status": "settled" },
+    { "id": "r-003", "amount": 2310, "currency": "USD", "status": "pending"
+  ]
+}

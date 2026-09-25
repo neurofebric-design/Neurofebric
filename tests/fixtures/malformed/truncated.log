@@ -1,0 +1,10 @@
+2024-11-03T04:09:58.110Z INFO  gateway        region=eu-west-1 mode=live handshake=ok
+2024-11-03T04:10:02.004Z INFO  authorize      p99=210ms target=250ms status=ok
+2024-11-03T04:10:31.771Z WARN  authorize      p99=612ms target=250ms
+2024-11-03T04:10:58.220Z INFO  authorize      p99=1310ms target=250ms
+2024-11-03T04:11:12.006Z WARN  upstream       connection reset by peer attempt=1
+2024-11-03T04:11:40.918Z WARN  ledger.settle  p99=1420ms target=250ms
+2024-11-03T04:12:10.443Z ERROR authorize      p99=1840ms target=250ms threshold_breached
+2024-11-03T04:12:44.902Z ERROR ledger.settle  p99=1420ms target=250ms threshold_breached
+2024-11-03T04:13:02.117Z INFO  payments.refund p99=95ms target=250ms status=ok
+2024-11-03T04:13:20.550Z ERROR upstream       retries exhausted after 5 attempts

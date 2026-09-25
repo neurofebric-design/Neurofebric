@@ -1,0 +1,24 @@
+{
+  "scenarioId": "REC-02",
+  "category": "failing_records",
+  "title": "All records rejected for a known reason",
+  "operation": "apply_batch",
+  "request": { "batchId": "batch-0002", "itemCount": 3 },
+  "idempotency": "IDEMPOTENT",
+  "outcome": "FAILED",
+  "observed": {
+    "acknowledged": true,
+    "terminalStatus": "REJECTED",
+    "succeeded": [],
+    "failed": ["item-1", "item-2", "item-3"],
+    "failures": [
+      { "item": "item-1", "code": "SOURCE_FROZEN", "detail": "source is frozen" },
+      { "item": "item-2", "code": "SOURCE_FROZEN", "detail": "source is frozen" },
+      { "item": "item-3", "code": "SOURCE_FROZEN", "detail": "source is frozen" }
+    ],
+    "sideEffectOccurred": false
+  },
+  "retryAllowed": false,
+  "correctNextAction": "Report a terminal failure with code SOURCE_FROZEN. Escalate. Do not retry: the cause is deterministic and an identical retry fails identically.",
+  "trap": "Treating 'all items failed the same way' as a transient error and retrying. The failure is confirmed and deterministic, so a retry burns budget and hides the real blocker."
+}

@@ -1,0 +1,24 @@
+{
+  "name": "cyclic-graph",
+  "description": "Contains exactly one cycle (x -> y -> z -> x) alongside a well-ordered chain and an isolated node. The cycle must be identified specifically, not merely reported as 'the graph has a cycle'.",
+  "directed": true,
+  "acyclic": false,
+  "nodes": [
+    { "id": "start", "label": "start" },
+    { "id": "p", "label": "p" },
+    { "id": "q", "label": "q" },
+    { "id": "x", "label": "x (cycle)" },
+    { "id": "y", "label": "y (cycle)" },
+    { "id": "z", "label": "z (cycle)" },
+    { "id": "orphan", "label": "orphan (no edges)" }
+  ],
+  "edges": [
+    { "from": "start", "to": "p" },
+    { "from": "p", "to": "q" },
+    { "from": "q", "to": "x" },
+    { "from": "x", "to": "y" },
+    { "from": "y", "to": "z" },
+    { "from": "z", "to": "x" },
+    { "from": "p", "to": "orphan" }
+  ]
+}

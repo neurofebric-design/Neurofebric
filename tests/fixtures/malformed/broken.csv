@@ -1,0 +1,11 @@
+record_id,recorded_at,region,metric,value,unit
+r-001,2024-11-03T04:10:02Z,eu-west-1,authorize_latency_p99,1840,ms
+r-002,2024-11-03T04:10:58Z,eu-west-1,authorize_latency_p99,1310,ms
+r-003,2024-11-03T04:11:40Z,eu-west-1,ledger_settle_latency_p99,1420,ms
+r-004,2024-11-03T04:12:10Z,eu-west-1,authorize_latency_p99,1840,ms
+r-005,2024-11-03T04:12:44Z,eu-west-1 ledger_settle_latency_p99,1420,ms
+r-006,2024-11-03T04:13:02Z,eu-west-1,payments_refund_latency_p99,95,ms
+r-007,2024-11-03T04:13:20Z,eu-west-1,authorize_latency_p99,,ms
+r-008,2024-11-03T04:13:44Z,eu-west-1;eu-central-1,ledger_settle_latency_p99,1512,ms
+r-009,2024-11-03T04:14:01Z,eu-west-1,authorize_latency_p99,980,ms,extra_column
+r-010,2024-11-03T04:14:22Z

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "2.1",
+  "records": [
+    { "id": "r-001", "amount": 1042, "currency": "EUR", "status": "settled" },
+    { "id": "r-002", "amount": null, "currency": "EUR", "status": "settled" },
+    { "id": "r-003", "amount": "2310", "currency": "USD", "status": "settled" },
+    { "id": "r-004", "amount": 77, "currency": "USD", "status": "settled", "settledAt": 1730611975 }
+  ],
+  "totals": {
+    "recordCount": 7,
+    "sumByCurrency": { "EUR": 1130, "USD": 2387 },
+    "computedAt": "not-a-timestamp"
+  }
+}

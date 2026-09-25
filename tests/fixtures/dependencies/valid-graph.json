@@ -1,0 +1,19 @@
+{
+  "name": "valid-graph",
+  "description": "Small, fully-connected-in-order DAG. Every node is reachable from the single source.",
+  "directed": true,
+  "acyclic": true,
+  "nodes": [
+    { "id": "a", "label": "source" },
+    { "id": "b", "label": "parse" },
+    { "id": "c", "label": "validate" },
+    { "id": "d", "label": "store" },
+    { "id": "e", "label": "report" }
+  ],
+  "edges": [
+    { "from": "a", "to": "b" },
+    { "from": "b", "to": "c" },
+    { "from": "c", "to": "d" },
+    { "from": "d", "to": "e" }
+  ]
+}

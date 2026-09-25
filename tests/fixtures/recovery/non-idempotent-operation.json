@@ -1,0 +1,21 @@
+{
+  "scenarioId": "REC-04",
+  "category": "non_idempotent",
+  "title": "Increment that cannot be safely repeated",
+  "operation": "increment_counter",
+  "request": { "counterId": "counter-77", "delta": 1 },
+  "idempotency": "NON_IDEMPOTENT",
+  "outcome": "UNKNOWN",
+  "observed": {
+    "acknowledged": false,
+    "terminalStatus": null,
+    "clientTimedOutAt": "2024-11-03T07:10:00Z",
+    "sideEffectOccurred": "UNKNOWN",
+    "currentCounterValueIfAppliedOnce": 41,
+    "currentCounterValueIfAppliedTwice": 42,
+    "note": "The counter read 40 before the call. Whether it is now 41 or 42 depends on whether the first increment landed. A retry guarantees a further increment and permanently corrupts the value, because there is no natural idempotency key."
+  },
+  "retryAllowed": false,
+  "correctNextAction": "Read the counter to establish actual state before deciding anything. Do not retry on the assumption that the first attempt failed.",
+  "trap": "Retrying a non-idempotent increment 'just in case'. Here a blind retry is not merely wasteful, it is an unrecoverable data corruption. Verification precedes retry, always."
+}

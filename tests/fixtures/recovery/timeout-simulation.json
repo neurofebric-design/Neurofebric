@@ -1,0 +1,21 @@
+{
+  "scenarioId": "REC-03",
+  "category": "timeout",
+  "title": "Acknowledgement timeout, final state unknown",
+  "operation": "submit_batch",
+  "request": { "batchId": "batch-0003", "itemCount": 8, "timeoutMs": 30000 },
+  "idempotency": "UNKNOWN",
+  "outcome": "UNKNOWN",
+  "observed": {
+    "acknowledged": false,
+    "terminalStatus": null,
+    "requestSentAt": "2024-11-03T07:00:00Z",
+    "clientTimedOutAt": "2024-11-03T07:00:30Z",
+    "serverResponseReceived": false,
+    "sideEffectOccurred": "UNKNOWN",
+    "note": "The client stopped waiting. The server may have applied the batch, may still be applying it, or may never have received it. No status was read back."
+  },
+  "retryAllowed": false,
+  "correctNextAction": "Report the outcome as UNKNOWN, not as failed. Do not retry blindly: idempotency is UNKNOWN, so a retry may duplicate the side effect. Verify actual state before any retry decision.",
+  "trap": "Concluding 'it timed out, therefore it failed' and retrying. A client-side acknowledgement timeout is an absence of information, not evidence of failure. This is the single most common incorrect recovery decision."
+}

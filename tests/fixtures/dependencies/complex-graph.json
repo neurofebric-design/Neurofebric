@@ -1,0 +1,28 @@
+{
+  "name": "complex-graph",
+  "description": "Larger DAG with diamond joins and two weakly-connected components. The second component is independent and must not be reported as a dependency of the first.",
+  "directed": true,
+  "acyclic": true,
+  "nodes": [
+    { "id": "root", "label": "root" },
+    { "id": "fetch", "label": "fetch" },
+    { "id": "decode", "label": "decode" },
+    { "id": "index", "label": "index" },
+    { "id": "checksum", "label": "checksum" },
+    { "id": "join", "label": "join" },
+    { "id": "emit", "label": "emit" },
+    { "id": "audit", "label": "audit (independent component)" },
+    { "id": "rotate", "label": "rotate (independent component)" }
+  ],
+  "edges": [
+    { "from": "root", "to": "fetch" },
+    { "from": "fetch", "to": "decode" },
+    { "from": "fetch", "to": "checksum" },
+    { "from": "decode", "to": "index" },
+    { "from": "checksum", "to": "index" },
+    { "from": "index", "to": "join" },
+    { "from": "decode", "to": "join" },
+    { "from": "join", "to": "emit" },
+    { "from": "audit", "to": "rotate" }
+  ]
+}

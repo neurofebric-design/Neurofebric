@@ -33,3 +33,5 @@ coverage/
 *.tmp
 *.temp
 *.swp
+
+!tests/fixtures/**/*.log
