@@ -4,7 +4,6 @@ import { discoverSkills } from "../../platform/skill-registry.mjs";
 import { KernelAdapter } from "../../platform/pi/kernel-adapter.ts";
 import { PiApprovalProvider } from "../../platform/pi/approval.ts";
 import { toolDescriptorFromPi } from "../../platform/pi/tool-adapter.ts";
-import type { ToolResult } from "../../platform/core/types.ts";
 
 type TraceEntry = {
   type: string;
@@ -70,56 +69,44 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
     record("task_received", { taskId: task.taskId, promptPreview: redactPreview(event.prompt) });
   });
 
+  // `tool_call` is a PREFLIGHT hook. Several can fire for one assistant message
+  // before any tool actually runs, so this stage performs policy evaluation
+  // ONLY and must never mutate the kernel task lifecycle.
   pi.on("tool_call", async (event, ctx) => {
     if (!kernel.currentTask) return undefined;
-    // A successful validation may be followed by another planned tool
-    // within the same Pi user turn. Recovery and terminal states remain blocked.
-    const status = kernel.currentTask.status;
-
-    if (status !== "PLANNING" && status !== "VALIDATING") {
-      return {
-        block: true,
-        reason: `Task is ${status}; no further tool execution is allowed without replanning`,
-      };
-    }
     const approval = new PiApprovalProvider(ctx.hasUI, async (prompt) => {
       return (await ctx.ui.confirm("Neurofebric policy approval", prompt)) === true;
     });
-    const decision = await kernel.evaluateToolCall(event.toolName, "execute", event.input, approval);
-    record("policy_decision", { tool: event.toolName, decision: decision.decision });
-    if (decision.decision === "DENY") {
-      return { block: true, reason: decision.reason };
-    }
-    if (decision.decision === "REQUIRE_APPROVAL") {
+    const { decision } = await kernel.precheckToolCall(event.toolName, "execute", event.input, approval, event.toolCallId);
+    record("policy_decision", { tool: event.toolName, toolCallId: event.toolCallId, decision, taskStatus: kernel.currentTask.status });
+    if (decision.decision !== "ALLOW") {
+      // `decision.reason` is present on both DENY and REQUIRE_APPROVAL.
       return { block: true, reason: decision.reason };
     }
     return undefined;
   });
 
+  // `tool_execution_start` is the real execution. This is where the tool call is
+  // bound to the task, a plan/step is created, the plan is validated and the task
+  // moves PLANNING -> PLAN_VALIDATION -> EXECUTING.
+  pi.on("tool_execution_start", async (event) => {
+    if (!kernel.currentTask) return;
+    const bound = await kernel.beginToolExecution(event.toolCallId, event.toolName, { toolCallId: event.toolCallId });
+    record("tool_execution_start", {
+      toolCallId: event.toolCallId,
+      tool: event.toolName,
+      bound: Boolean(bound),
+      taskStatus: kernel.currentTask.status,
+    });
+  });
+
+  // `tool_execution_end` is observation and validation of a real bound execution.
   pi.on("tool_execution_end", async (event) => {
     if (!kernel.currentTask) return;
-    // Pi owns the actual result shape; the kernel receives a bounded normalized result.
-    const now = new Date().toISOString();
-    const result: ToolResult = {
-      success: !event.isError,
-      data: event.result,
-      metadata: { toolCallId: event.toolCallId },
-      artifacts: [],
-      warnings: [],
-      error: event.isError ? { category: "TOOL_ERROR", message: "Pi reported a tool error", retryable: false } : undefined,
-      provenance: [],
-      execution: {
-        executionId: event.toolCallId,
-        taskId: kernel.currentTask.taskId,
-        stepId: kernel.currentTask.currentStep ?? "unknown",
-        tool: event.toolName,
-        startedAt: now,
-        endedAt: now,
-        status: event.isError ? "FAILED" : "COMPLETED",
-        retryNumber: 0,
-      },
-    };
-    await kernel.observeToolResult(result, event.isError ? new Error("Pi reported a tool error") : undefined);
+    // Pi owns the actual result shape; the kernel normalizes it against the
+    // bound execution identity so task/step correlation cannot drift.
+    await kernel.recordToolResult(event.toolCallId, event.toolName, event.result, event.isError);
+    record("tool_execution_end", { toolCallId: event.toolCallId, tool: event.toolName, isError: event.isError, taskStatus: kernel.currentTask.status });
   });
 
   pi.on("agent_end", async (event) => {

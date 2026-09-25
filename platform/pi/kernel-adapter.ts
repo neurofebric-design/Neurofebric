@@ -14,6 +14,7 @@ import {
   type PolicyDecision,
   type SkillDescriptor,
   type Task,
+  type TaskStatus,
   type ToolDescriptor,
   type ToolResult,
   type ValidationResult,
@@ -31,6 +32,34 @@ export interface ToolCallDecision {
   plan?: Plan;
   task?: Task;
 }
+
+/**
+ * A real tool execution bound to the task, identified by Pi's toolCallId.
+ * This is the only identity used to correlate tool_execution_end.
+ */
+export interface BoundExecution {
+  toolCallId: string;
+  executionId: string;
+  planId: string;
+  stepId: string;
+  tool: string;
+  startedAt: string;
+}
+
+/**
+ * States from which a *new* tool execution must not be admitted.
+ * RECOVERING/REPLANNING mean the kernel is deciding what to do next,
+ * and the rest are terminal.
+ */
+const REFUSED_EXECUTION_STATES: readonly TaskStatus[] = [
+  "RECOVERING",
+  "REPLANNING",
+  "ESCALATED",
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+  "TIMEOUT",
+];
 
 function event(type: Parameters<EventBus["emit"]>[0]["type"], taskId: string, payload: Record<string, unknown> = {}) {
   return {
@@ -53,7 +82,18 @@ export class KernelAdapter {
   private task?: Task;
   private plan?: Plan;
   private lastValidation?: ValidationResult;
+  private recoveryDepth = 0;
+
+  /** Real executions currently in flight, keyed by Pi toolCallId. */
+  private readonly activeExecutions = new Map<string, BoundExecution>();
+  /** Every toolCallId that has been admitted (started or policy-denied) at preflight. */
+  private readonly knownToolCallIds = new Set<string>();
+  /** Preflight-denied toolCallIds; Pi may still emit an execution_start for them. */
+  private readonly deniedToolCallIds = new Set<string>();
+  /** Execution ids whose result has already been observed. */
   private readonly observedExecutionIds = new Set<string>();
+  /** Number of real tool executions bound to this task (drives honest finalisation). */
+  private toolExecutionCount = 0;
 
   constructor(options: KernelAdapterOptions = {}) {
     this.tools = new ToolRegistry();
@@ -86,13 +126,23 @@ export class KernelAdapter {
     return this.plan;
   }
 
+  /** Real executions currently in flight. Used by the Pi adapter to correlate results. */
+  activeExecution(toolCallId: string): BoundExecution | undefined {
+    return this.activeExecutions.get(toolCallId);
+  }
+
   async beginTask(userRequest: string, objective = userRequest, constraints: Record<string, unknown> = {}): Promise<Task> {
     // Task state is explicit; Pi's transcript remains the source of conversational context.
     const task = createTask({ taskId: randomUUID(), userRequest, objective, constraints });
     this.task = task;
     this.plan = undefined;
     this.lastValidation = undefined;
+    this.recoveryDepth = 0;
+    this.activeExecutions.clear();
+    this.knownToolCallIds.clear();
+    this.deniedToolCallIds.clear();
     this.observedExecutionIds.clear();
+    this.toolExecutionCount = 0;
     await this.events.emit(event("TASK_CREATED", task.taskId, { objective: task.objective }));
     this.task = transitionTask(this.task, "UNDERSTANDING");
     await this.events.emit(event("TASK_STARTED", task.taskId));
@@ -101,19 +151,154 @@ export class KernelAdapter {
     return this.task;
   }
 
-  async planToolCall(toolName: string, input: unknown, inputMetadata?: Record<string, unknown>): Promise<ToolCallDecision> {
+  // ---------------------------------------------------------------------------
+  // POLICY PRECHECK  (Pi `tool_call` — a preflight interception hook)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Policy evaluation only. This is called from Pi's `tool_call` preflight hook,
+   * which may fire several times *before* any tool actually executes.
+   *
+   * It therefore must not create a plan, must not bind a step, and must not
+   * move the task through the lifecycle. It is intentionally side-effect free
+   * with respect to task state.
+   */
+  async precheckToolCall(
+    toolName: string,
+    operation: string,
+    input: unknown,
+    approval?: ApprovalProvider,
+    toolCallId?: string,
+  ): Promise<ToolCallDecision> {
     if (!this.task) throw new Error("No active task");
-    // Pi has already selected the operation; the kernel validates it before Pi executes it.
-    // A completed validation within the same Pi user turn allows planning
-    // of the next tool. Recovery and terminal states remain blocked.
-    if (this.task.status === "VALIDATING" && this.lastValidation?.status === "VALID") {
-      this.task = transitionTask(this.task, "PLANNING");
+    // Unknown tools are rejected here, before Pi executes anything.
+    const tool = this.tools.get(toolName);
+    const policy = approval ? new DefaultPolicy(approval) : this.policy;
+    const request = { taskId: this.task.taskId, tool, operation, input };
+    // Evaluate first so that an approval prompt is traced even when it is granted.
+    const required = policy.evaluate(request);
+    const decision = approval ? await policy.evaluateWithApproval(request) : required;
+
+    if (required.decision === "REQUIRE_APPROVAL") {
+      await this.events.emit(event("APPROVAL_REQUIRED", this.task.taskId, { tool: toolName, toolCallId }));
+    }
+    if (decision.decision === "DENY") {
+      if (toolCallId) {
+        // Remember the denial so a later execution_start for this id is ignored
+        // rather than turned into a fake successful execution.
+        this.deniedToolCallIds.add(toolCallId);
+        this.knownToolCallIds.add(toolCallId);
+      }
+      await this.events.emit(event("APPROVAL_DENIED", this.task.taskId, { tool: toolName, toolCallId, reason: decision.reason }));
+    }
+    return { decision, task: this.task };
+  }
+
+  // ---------------------------------------------------------------------------
+  // EXECUTION START  (Pi `tool_execution_start` — the real execution)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Bind a real tool execution to the task. This is the only place that creates
+   * a plan/step and advances the lifecycle:
+   *
+   *   PLANNING -> PLAN_VALIDATION -> EXECUTING
+   *
+   * Correlated by Pi's toolCallId. Duplicate starts, preflight-denied calls and
+   * unauthorised task states are ignored rather than corrupting state.
+   */
+  async beginToolExecution(toolCallId: string, toolName: string, inputMetadata?: Record<string, unknown>): Promise<BoundExecution | undefined> {
+    if (!this.task) throw new Error("No active task");
+    const taskId = this.task.taskId;
+
+    if (this.deniedToolCallIds.has(toolCallId)) {
+      // Pi emits execution_start around a blocked preflight. Never fabricate
+      // an execution plan for a call policy refused.
+      await this.events.emit(event("TOOL_EXECUTION_IGNORED", taskId, { toolCallId, tool: toolName, reason: "policy_denied" }));
+      return undefined;
     }
 
-    if (this.task.status !== "PLANNING") {
-      throw new CoreError("TASK_ERROR", `Task cannot plan from state ${this.task.status}`, { taskId: this.task.taskId });
+    if (this.knownToolCallIds.has(toolCallId) || this.activeExecutions.has(toolCallId)) {
+      await this.events.emit(event("TOOL_EXECUTION_IGNORED", taskId, { toolCallId, tool: toolName, reason: "duplicate_execution_start" }));
+      return undefined;
     }
+
+    if (REFUSED_EXECUTION_STATES.includes(this.task.status)) {
+      await this.events.emit(event("TOOL_EXECUTION_IGNORED", taskId, {
+        toolCallId,
+        tool: toolName,
+        reason: "task_state_not_authorised",
+        taskStatus: this.task.status,
+      }));
+      return undefined;
+    }
+
     const tool = this.tools.get(toolName);
+
+    // Pi's default tool execution mode is "parallel": several tool_execution_start
+    // events are emitted before any of them finishes. Siblings join the EXECUTING
+    // phase instead of re-entering PLANNING.
+    const joiningSibling = this.task.status === "EXECUTING" && this.activeExecutions.size > 0;
+
+    if (!joiningSibling) {
+      if (this.task.status === "VALIDATING") {
+        // A completed validation is the real planning boundary for the next tool.
+        if (this.lastValidation?.status !== "VALID") {
+          await this.events.emit(event("TOOL_EXECUTION_IGNORED", taskId, {
+            toolCallId,
+            tool: toolName,
+            reason: "last_validation_not_valid",
+            taskStatus: this.task.status,
+          }));
+          return undefined;
+        }
+        this.task = transitionTask(this.task, "PLANNING");
+      }
+      if (this.task.status !== "PLANNING") {
+        await this.events.emit(event("TOOL_EXECUTION_IGNORED", taskId, {
+          toolCallId,
+          tool: toolName,
+          reason: "task_state_not_authorised",
+          taskStatus: this.task.status,
+        }));
+        return undefined;
+      }
+
+      const { plan, step } = this.buildPlanStep(toolName, tool);
+      this.plan = plan;
+      this.task = {
+        ...this.task,
+        currentPlan: plan,
+        currentStep: step.stepId,
+        selectedTools: [toolName],
+        selectedSkills: plan.selectedSkills,
+      };
+      this.task = transitionTask(this.task, "PLAN_VALIDATION");
+      validatePlan(plan, this.skills, this.tools.list());
+      await this.events.emit(event("PLAN_VALIDATED", taskId, { planId: plan.planId, toolCallId }));
+      for (const skill of plan.selectedSkills) await this.events.emit(event("SKILL_SELECTED", taskId, { skill }));
+      await this.events.emit(event("TOOL_SELECTED", taskId, { tool: toolName, toolCallId, inputMetadata }));
+      this.task = transitionTask(this.task, "EXECUTING");
+    }
+
+    const bound: BoundExecution = {
+      toolCallId,
+      executionId: toolCallId,
+      planId: this.plan?.planId ?? "",
+      stepId: joiningSibling ? `pi-${randomUUID().slice(0, 8)}` : this.task.currentStep!,
+      tool: toolName,
+      startedAt: new Date().toISOString(),
+    };
+
+    this.knownToolCallIds.add(toolCallId);
+    this.activeExecutions.set(toolCallId, bound);
+    this.toolExecutionCount += 1;
+    await this.events.emit(event("TOOL_EXECUTION_STARTED", taskId, { toolCallId, tool: toolName, stepId: bound.stepId, joiningSibling }));
+    return bound;
+  }
+
+  private buildPlanStep(toolName: string, tool: ToolDescriptor): { plan: Plan; step: PlanStep } {
+    const task = this.task!;
     const step: PlanStep = {
       stepId: `pi-${randomUUID().slice(0, 8)}`,
       description: `Execute Pi tool ${toolName}`,
@@ -127,7 +312,7 @@ export class KernelAdapter {
     };
     const plan: Plan = {
       planId: randomUUID(),
-      objective: this.task.objective,
+      objective: task.objective,
       assumptions: ["Pi selected the requested tool"],
       steps: [step],
       selectedSkills: this.skills.filter((skill) => skill.requiredTools.includes(toolName)).map((skill) => skill.name),
@@ -136,90 +321,88 @@ export class KernelAdapter {
       validationCriteria: [step.validationCriteria[0]],
       riskLevel: tool.riskLevel,
     };
-    this.plan = plan;
-    this.task = { ...this.task, currentPlan: plan, currentStep: step.stepId, selectedTools: [toolName], selectedSkills: plan.selectedSkills };
-    this.task = transitionTask(this.task, "PLAN_VALIDATION");
-    validatePlan(plan, this.skills, this.tools.list());
-    await this.events.emit(event("PLAN_VALIDATED", this.task.taskId, { planId: plan.planId }));
-    for (const skill of plan.selectedSkills) await this.events.emit(event("SKILL_SELECTED", this.task.taskId, { skill }));
-    await this.events.emit(event("TOOL_SELECTED", this.task.taskId, { tool: toolName, inputMetadata }));
-    this.task = transitionTask(this.task, "EXECUTING");
-    return { decision: { decision: "ALLOW" }, plan, task: this.task };
+    return { plan, step };
   }
 
-  async evaluateToolCall(toolName: string, operation: string, input: unknown, approval?: ApprovalProvider): Promise<ToolCallDecision> {
-    const planned = await this.planToolCall(toolName, input);
-    const policy = approval ? new DefaultPolicy(approval) : this.policy;
-    const decision = approval
-      ? await policy.evaluateWithApproval({ taskId: this.task!.taskId, tool: this.tools.get(toolName), operation, input })
-      : policy.evaluate({ taskId: this.task!.taskId, tool: this.tools.get(toolName), operation, input });
-    if (decision.decision === "REQUIRE_APPROVAL") await this.events.emit(event("APPROVAL_REQUIRED", this.task!.taskId, { tool: toolName }));
-    if (decision.decision === "DENY") {
-      await this.events.emit(event("APPROVAL_DENIED", this.task!.taskId, { tool: toolName, reason: decision.reason }));
-      this.task = transitionTask(this.task!, "RECOVERING");
-      this.task = transitionTask(this.task!, "FAILED");
-      await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: decision.reason }));
-    }
-    return { ...planned, decision };
-  }
+  // ---------------------------------------------------------------------------
+  // EXECUTION END  (Pi `tool_execution_end` — observation and validation)
+  // ---------------------------------------------------------------------------
 
   async observeToolResult(result: ToolResult, error?: unknown): Promise<ValidationResult> {
-    if (!this.task || !this.plan?.steps[0]) throw new Error("No active tool step");
+    if (!this.task) throw new Error("No active tool step");
     const executionId = result.execution.executionId;
 
-    // Pi can emit duplicate or late tool_execution_end events.
-    // Only the active EXECUTING result may advance to OBSERVING.
+    // Pi can emit duplicate tool_execution_end events.
     if (this.observedExecutionIds.has(executionId)) {
-      await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, {
-        executionId,
-        reason: "duplicate_execution_result",
-      }));
-      return {
-        status: "INCONCLUSIVE",
-        validator: "pi-result-dedup",
-        message: "Duplicate tool result ignored",
-      };
+      await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, { executionId, reason: "duplicate_execution_result" }));
+      return { status: "INCONCLUSIVE", validator: "pi-result-dedup", message: "Duplicate tool result ignored" };
     }
 
-    if (
-      result.execution.taskId !== this.task.taskId ||
-      result.execution.stepId !== this.task.currentStep ||
-      this.task.status !== "EXECUTING"
-    ) {
+    const bound = this.resolveBoundExecution(executionId, result.execution.stepId);
+
+    // Only a real active execution may advance the lifecycle. This also rejects
+    // late/out-of-order results, so we never attempt VALIDATING -> OBSERVING or
+    // RECOVERING -> OBSERVING.
+    if (!bound || result.execution.taskId !== this.task.taskId || this.task.status !== "EXECUTING") {
       await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, {
         executionId,
-        reason: "stale_or_out_of_order_result",
+        reason: bound ? "stale_or_out_of_order_result" : "no_active_execution",
         taskStatus: this.task.status,
-        currentStep: this.task.currentStep,
+        boundStep: bound?.stepId,
         resultTaskId: result.execution.taskId,
         resultStep: result.execution.stepId,
       }));
-      return {
-        status: "INCONCLUSIVE",
-        validator: "pi-result-order",
-        message: "Late or out-of-order tool result ignored",
-      };
+      return { status: "INCONCLUSIVE", validator: "pi-result-order", message: "Late or out-of-order tool result ignored" };
+    }
+
+    // Stale step identity: the result must belong to the execution it claims.
+    if (result.execution.stepId !== bound.stepId) {
+      await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, {
+        executionId,
+        reason: "stale_step_id",
+        boundStep: bound.stepId,
+        resultStep: result.execution.stepId,
+      }));
+      return { status: "INCONCLUSIVE", validator: "pi-result-order", message: "Stale step id ignored" };
     }
 
     this.observedExecutionIds.add(executionId);
+    this.activeExecutions.delete(executionId);
 
-    // A successful tool call is not a successful task until validation passes.
-    this.task = transitionTask(this.task, "OBSERVING");
-    this.task = { ...this.task, observations: [...this.task.observations, result.success ? "Tool completed" : "Tool failed"] };
-    await this.events.emit(event(result.success ? "TOOL_COMPLETED" : "TOOL_FAILED", this.task.taskId, { executionId: result.execution.executionId, error: error?.message }));
-    this.task = transitionTask(this.task, "VALIDATING");
+    await this.events.emit(event(result.success ? "TOOL_COMPLETED" : "TOOL_FAILED", this.task.taskId, {
+      executionId,
+      stepId: bound.stepId,
+      tool: result.execution.tool,
+      error: error?.message,
+    }));
+
     const validation: ValidationResult = result.success
       ? { status: "VALID", validator: "pi-result", message: "Pi returned a successful tool result" }
       : { status: "INVALID", validator: "pi-result", message: error instanceof Error ? error.message : "Tool failed" };
+
+    // Sibling executions from the same assistant message are still in flight;
+    // the task stays EXECUTING until the last one settles.
+    if (this.activeExecutions.size > 0) {
+      this.task = {
+        ...this.task,
+        observations: [...this.task.observations, result.success ? "Tool completed" : "Tool failed"],
+        validationResults: [...this.task.validationResults, validation],
+      };
+      return validation;
+    }
+
+    // Last execution: observe, then validate.
+    this.task = transitionTask(this.task, "OBSERVING");
+    this.task = { ...this.task, observations: [...this.task.observations, result.success ? "Tool completed" : "Tool failed"] };
+    this.task = transitionTask(this.task, "VALIDATING");
     this.lastValidation = validation;
     this.task = { ...this.task, validationResults: [...this.task.validationResults, validation] };
     await this.events.emit(event(validation.status === "VALID" ? "VALIDATION_COMPLETED" : "VALIDATION_FAILED", this.task.taskId, validation as unknown as Record<string, unknown>));
+
     if (validation.status !== "VALID") {
       this.task = transitionTask(this.task, "RECOVERING");
-
       const tool = this.tools.get(result.execution.tool);
       const failure = classifyFailure(error);
-
       const strategy = chooseRecovery({
         failure,
         limits: this.limits,
@@ -228,44 +411,26 @@ export class KernelAdapter {
         depth: this.recoveryDepth,
         idempotency: tool.idempotency,
       });
-
       this.recoveryDepth += 1;
-
-      await this.events.emit(event("RECOVERY_STARTED", this.task.taskId, {
-        strategy,
-        failure,
-        recoveryDepth: this.recoveryDepth,
-      }));
+      await this.events.emit(event("RECOVERY_STARTED", this.task.taskId, { strategy, failure, recoveryDepth: this.recoveryDepth }));
 
       switch (strategy) {
         case "RETRY":
-          this.task = {
-            ...this.task,
-            retryCount: this.task.retryCount + 1,
-          };
-
+          this.task = { ...this.task, retryCount: this.task.retryCount + 1 };
           this.task = transitionTask(this.task, "RETRYING");
           this.task = transitionTask(this.task, "PLANNING");
           break;
-
         case "REPLAN":
-          this.task = {
-            ...this.task,
-            replanCount: this.task.replanCount + 1,
-          };
-
+          this.task = { ...this.task, replanCount: this.task.replanCount + 1 };
           this.task = transitionTask(this.task, "REPLANNING");
           this.task = transitionTask(this.task, "PLANNING");
           break;
-
         case "ESCALATE":
           this.task = transitionTask(this.task, "ESCALATED");
           break;
-
         case "TERMINATE":
         default:
           this.task = transitionTask(this.task, "FAILED");
-
           await this.events.emit(event("TASK_FAILED", this.task.taskId, {
             reason: "Recovery budget exhausted or no safe recovery strategy remains",
             strategy,
@@ -279,6 +444,110 @@ export class KernelAdapter {
     return validation;
   }
 
+  /**
+   * Convenience entry point for the Pi adapter: builds a normalized result from
+   * the *bound* execution identity so task/step correlation cannot drift.
+   */
+  async recordToolResult(toolCallId: string, toolName: string, payload: unknown, isError: boolean): Promise<ValidationResult> {
+    if (!this.task) throw new Error("No active task");
+    const bound = this.activeExecutions.get(toolCallId);
+    const now = new Date().toISOString();
+    const result: ToolResult = {
+      success: !isError,
+      data: isError ? undefined : payload,
+      metadata: { toolCallId },
+      artifacts: [],
+      warnings: [],
+      error: isError ? { category: "TOOL_ERROR", message: "Pi reported a tool error", retryable: false } : undefined,
+      provenance: [],
+      execution: {
+        executionId: toolCallId,
+        taskId: this.task.taskId,
+        stepId: bound?.stepId ?? this.task.currentStep ?? "unknown",
+        tool: toolName,
+        startedAt: bound?.startedAt ?? now,
+        endedAt: now,
+        status: isError ? "FAILED" : "COMPLETED",
+        retryNumber: 0,
+      },
+    };
+    return this.observeToolResult(result, isError ? new Error("Pi reported a tool error") : undefined);
+  }
+
+  /**
+   * Resolve which execution a result belongs to.
+   *
+   * Normal path: a real execution bound at tool_execution_start.
+   * Fallback: a direct kernel caller (unit tests / non-Pi embedding) that drove
+   * the legacy planToolCall path, where the sole EXECUTING step is the target.
+   */
+  private resolveBoundExecution(executionId: string, stepId: string): BoundExecution | undefined {
+    const bound = this.activeExecutions.get(executionId);
+    if (bound) return bound;
+    if (this.activeExecutions.size === 0 && this.task?.status === "EXECUTING" && this.task.currentStep === stepId) {
+      return {
+        toolCallId: executionId,
+        executionId,
+        planId: this.plan?.planId ?? "",
+        stepId,
+        tool: this.plan?.selectedTools[0] ?? "unknown",
+        startedAt: new Date().toISOString(),
+      };
+    }
+    return undefined;
+  }
+
+  // ---------------------------------------------------------------------------
+  // LEGACY DIRECT-KERNEL ENTRY POINTS
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Plan a tool call without an execution identity. Retained for direct kernel
+   * embeddings and existing tests; the Pi adapter uses the precheck/execution
+   * lifecycle above instead.
+   */
+  async planToolCall(toolName: string, _input: unknown, inputMetadata?: Record<string, unknown>): Promise<ToolCallDecision> {
+    if (!this.task) throw new Error("No active task");
+    if (this.task.status !== "PLANNING") {
+      throw new CoreError("TASK_ERROR", `Task cannot plan from state ${this.task.status}`, { taskId: this.task.taskId });
+    }
+    const tool = this.tools.get(toolName);
+    const { plan, step } = this.buildPlanStep(toolName, tool);
+    this.plan = plan;
+    this.task = { ...this.task, currentPlan: plan, currentStep: step.stepId, selectedTools: [toolName], selectedSkills: plan.selectedSkills };
+    this.task = transitionTask(this.task, "PLAN_VALIDATION");
+    validatePlan(plan, this.skills, this.tools.list());
+    await this.events.emit(event("PLAN_VALIDATED", this.task.taskId, { planId: plan.planId }));
+    for (const skill of plan.selectedSkills) await this.events.emit(event("SKILL_SELECTED", this.task.taskId, { skill }));
+    await this.events.emit(event("TOOL_SELECTED", this.task.taskId, { tool: toolName, inputMetadata }));
+    this.task = transitionTask(this.task, "EXECUTING");
+    this.toolExecutionCount += 1;
+    return { decision: { decision: "ALLOW" }, plan, task: this.task };
+  }
+
+  /**
+   * Legacy combined entry point: plan, then evaluate policy, failing the task on
+   * denial. The Pi adapter must use `precheckToolCall` + `beginToolExecution`
+   * instead; this exists for direct kernel callers and legacy tests.
+   */
+  async evaluateToolCall(toolName: string, operation: string, input: unknown, approval?: ApprovalProvider): Promise<ToolCallDecision> {
+    // Legacy ordering: plan first, then evaluate. Denial recovery therefore runs
+    // from EXECUTING (EXECUTING -> RECOVERING -> FAILED), as it always has.
+    const planned = await this.planToolCall(toolName, input);
+    const precheck = await this.precheckToolCall(toolName, operation, input, approval);
+    if (precheck.decision.decision === "DENY") {
+      this.task = transitionTask(this.task!, "RECOVERING");
+      this.task = transitionTask(this.task!, "FAILED");
+      await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: precheck.decision.reason }));
+      return { decision: precheck.decision, task: this.task };
+    }
+    return { ...planned, decision: precheck.decision };
+  }
+
+  // ---------------------------------------------------------------------------
+  // FINALISATION
+  // ---------------------------------------------------------------------------
+
   async finishTask(finalResult: unknown): Promise<Task> {
     if (!this.task) throw new Error("No active task");
     if (this.task.status === "RECOVERING") {
@@ -286,23 +555,72 @@ export class KernelAdapter {
       await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: "Recovery requires a new planning turn" }));
       return this.task;
     }
-    if (!this.plan) {
-      const step: PlanStep = { stepId: "response", description: "Return response", tools: [], dependencies: [], expectedOutput: "Response", validationCriteria: ["Response produced"], retryPolicy: { maxAttempts: 1, backoffMs: 0, maxBackoffMs: 0 }, timeoutMs: 1000, status: "PENDING" };
-      this.plan = { planId: randomUUID(), objective: this.task.objective, assumptions: [], steps: [step], selectedSkills: [], selectedTools: [], expectedOutputs: ["Response"], validationCriteria: ["Response produced"], riskLevel: "READ_ONLY" };
-      this.task = { ...this.task, currentPlan: this.plan };
-    }
-    if (this.task.status === "PLANNING") this.task = transitionTask(this.task, "PLAN_VALIDATION");
-    if (this.task.status === "PLAN_VALIDATION") this.task = transitionTask(this.task, "EXECUTING");
-    if (this.task.status === "EXECUTING") this.task = transitionTask(this.task, "OBSERVING");
-    if (this.task.status === "OBSERVING") this.task = transitionTask(this.task, "VALIDATING");
-    if (this.task.status === "VALIDATING" && this.lastValidation?.status !== "INVALID") {
+
+    if (this.toolExecutionCount > 0) {
+      // A task that really executed tools is only complete from its own real
+      // validation. Never fabricate an OBSERVING/VALIDATING pass here.
+      if (this.task.status !== "VALIDATING") {
+        await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, {
+          reason: "finish_without_validated_execution",
+          taskStatus: this.task.status,
+        }));
+        return this.task;
+      }
+      if (this.lastValidation?.status === "INVALID") {
+        this.task = transitionTask(this.task, "FAILED");
+        await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: "Validation failed" }));
+        return this.task;
+      }
       this.task = transitionTask(this.task, "COMPLETED", new Date().toISOString());
       this.task = { ...this.task, finalResult };
       await this.events.emit(event("TASK_COMPLETED", this.task.taskId));
-    } else if (this.task.status === "VALIDATING") {
-      this.task = transitionTask(this.task, "FAILED");
-      await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: "Validation failed" }));
+      return this.task;
     }
+
+    // No-tool task: the assistant response is the real executed step, so the
+    // response is planned, executed, observed and validated for real.
+    const step: PlanStep = {
+      stepId: "response",
+      description: "Return response",
+      tools: [],
+      dependencies: [],
+      expectedOutput: "Response",
+      validationCriteria: ["Response produced"],
+      retryPolicy: { maxAttempts: 1, backoffMs: 0, maxBackoffMs: 0 },
+      timeoutMs: 1000,
+      status: "PENDING",
+    };
+    const plan: Plan = {
+      planId: randomUUID(),
+      objective: this.task.objective,
+      assumptions: [],
+      steps: [step],
+      selectedSkills: [],
+      selectedTools: [],
+      expectedOutputs: ["Response"],
+      validationCriteria: ["Response produced"],
+      riskLevel: "READ_ONLY",
+    };
+    this.plan = plan;
+    this.task = { ...this.task, currentPlan: plan, currentStep: step.stepId };
+    this.task = transitionTask(this.task, "PLAN_VALIDATION");
+    validatePlan(plan, this.skills, this.tools.list());
+    await this.events.emit(event("PLAN_VALIDATED", this.task.taskId, { planId: plan.planId }));
+    this.task = transitionTask(this.task, "EXECUTING");
+
+    this.task = transitionTask(this.task, "OBSERVING");
+    this.task = { ...this.task, observations: [...this.task.observations, "Assistant response produced"] };
+    await this.events.emit(event("RESPONSE_OBSERVED", this.task.taskId));
+    this.task = transitionTask(this.task, "VALIDATING");
+
+    const validation: ValidationResult = { status: "VALID", validator: "pi-response", message: "Assistant produced a response" };
+    this.lastValidation = validation;
+    this.task = { ...this.task, validationResults: [...this.task.validationResults, validation] };
+    await this.events.emit(event("VALIDATION_COMPLETED", this.task.taskId, validation as unknown as Record<string, unknown>));
+
+    this.task = transitionTask(this.task, "COMPLETED", new Date().toISOString());
+    this.task = { ...this.task, finalResult };
+    await this.events.emit(event("TASK_COMPLETED", this.task.taskId));
     return this.task;
   }
 
