@@ -33,6 +33,21 @@ const CONTENT_PARAM_NAMES: ReadonlySet<string> = new Set([
   "old_string",
 ]);
 
+/**
+ * Split command text into candidate program tokens.
+ *
+ * Shell quoting, redirection and separators are removed so that `bash -c "rm -rf
+ * /"` and `echo x && rm -f y` both yield `rm` as a token. Only the resulting
+ * words are returned, so a word that merely contains a program name is not
+ * mistaken for one.
+ */
+export function commandTokens(text: string): string[] {
+  return text
+    .split(/[\s"'`()<>;|&,]+/)
+    .map((token) => token.replace(/^[=/-]+/, "").replace(/[=/]+$/, ""))
+    .filter((token) => token.length > 0);
+}
+
 export class ConfiguredPolicy implements PolicyEngine {
   readonly mode: PolicyMode;
   private readonly config: PolicyConfig;
@@ -127,6 +142,13 @@ export class ConfiguredPolicy implements PolicyEngine {
     );
     if (commandDenial) return commandDenial;
 
+    const tokenDenial = this.matchCommandTokens(
+      this.config.destructiveCommandTokens,
+      collectStrings(extractCommandText(tool, input)),
+      where,
+    );
+    if (tokenDenial) return tokenDenial;
+
     if (tool.riskLevel === "WRITE") {
       const secretDenial = this.matchIn(
         this.config.secretWritePatterns,
@@ -197,6 +219,33 @@ export class ConfiguredPolicy implements PolicyEngine {
       const relative = path.relative(root, candidate);
       if (relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)) {
         return relative;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The deletion guard: refuse a command that invokes a listed destructive
+   * program, whatever flags it carries.
+   *
+   * Comparison is on whole tokens, so `rm`, `rm -f`, `rm -rf`, `rm -r -f` and
+   * `rm file` are all caught while a word that merely ends in `rm` is not. Shell
+   * quoting and separators are stripped first, so `bash -c "rm -rf /"` is caught
+   * too — which is the injected-content case.
+   */
+  private matchCommandTokens(
+    tokens: readonly string[],
+    texts: readonly string[],
+    where: string,
+  ): string | undefined {
+    if (tokens.length === 0) return undefined;
+    const wanted = new Set(tokens.map((token) => token.toLowerCase()));
+
+    for (const text of texts) {
+      for (const candidate of commandTokens(text)) {
+        if (wanted.has(candidate.toLowerCase())) {
+          return `${where}: destructive command '${candidate}' is denied; shell must not bypass deletion control`;
+        }
       }
     }
     return undefined;

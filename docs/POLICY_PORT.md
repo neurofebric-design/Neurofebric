@@ -18,7 +18,7 @@ legacy reference implementation's own configuration.
 | deny beats allow | Deny is evaluated first, so it wins | Same ordering, pinned by a test | ✅ |
 | `file_rules: workspace/** allow, ** deny`, first match wins | `_check_path` walks rules in order, returns on the first match, default deny | `PolicyConfig.fileRules` (ordered glob patterns) over the path relative to the configured root, first match wins, default deny | ✅ |
 | `workspace` as a magic prefix | `workspace` meant `config.workspace_dir` | `WorkspaceBoundary` with explicit `allowedRoots`, plus symlink/junction-defeating realpath resolution the legacy version did not have | ✅ strictly stronger |
-| `denied_content_patterns` (case-insensitive substring over all args) | Step 4: joins `args.values()` and substring-matches | **Split into two scoped fields** — see "Content pattern scoping" below | ⚠️ deliberately narrowed, see below |
+| `denied_content_patterns` (case-insensitive substring over all args) | Step 4: joins `args.values()` and substring-matches | **Split into three scoped fields** — `destructiveCommandPatterns` (substring, command text), `destructiveCommandTokens` (whole-token, command text, the deletion guard), and `secretWritePatterns` (write payloads only) | ⚠️ deliberately narrowed and completed, see below |
 | `limits.max_tool_calls_per_run: 40` | Step 3, counted per run, only on success | `limits.maxToolCallsPerTask`, counted per `taskId`, only on success | ⚠️ renamed: the kernel's unit is a task, not a run |
 | `limits.max_file_writes_per_run: 10` | Counted on `write_file` only | `limits.maxFileWritesPerTask`, counted on any tool classified `riskLevel: WRITE` (so `edit` counts too) | ✅ broader |
 | `limits.max_bytes_per_write: 2000000` | Step 6, `len(content.encode("utf-8"))` | `limits.maxBytesPerWrite`, measured as UTF-8 bytes of the write payload | ✅ |
@@ -43,10 +43,11 @@ legacy reference implementation's own configuration.
    `Task` it creates per user turn. Limits are therefore per task.
 4. **Content patterns now match arguments, not file contents.** Narrowed further
    than the legacy engine: the patterns are split by scope
-   (`destructiveCommandPatterns` for command text, `secretWritePatterns` for
-   write payloads), because matching all patterns against all arguments blocked
-   `grep` for `password` and therefore blocked credential analysis entirely.
-   This is a deliberate correctness fix, not a faithful port.
+   (`destructiveCommandPatterns` for command text, `destructiveCommandTokens` for
+   the deletion guard, `secretWritePatterns` for write payloads), because matching
+   all patterns against all arguments blocked `grep` for `password` and therefore
+   blocked credential analysis entirely. This is a deliberate correctness fix, not a
+   faithful port.
 
 ## Content pattern scoping (deliberate divergence from the legacy engine)
 
@@ -60,10 +61,12 @@ the payload each one is actually about.
 | Config field | Matched against | Applies to |
 | --- | --- | --- |
 | `destructiveCommandPatterns` | **Command text only** — the `command`, `cmd`, `script`, `shell`, `shellCommand`, `args`, `argv` arguments; for a shell tool, the whole payload | Every tool tier |
+| `destructiveCommandTokens` | **Command text only**, as whole tokens | Every tool tier |
 | `secretWritePatterns` | **Content payload only** — the `content`, `contents`, `text`, `body`, `data`, `new_string`, `old_string` arguments | `riskLevel: WRITE` tools only |
 
-Shipped values: destructive is `rm -rf`, `format c:`; secret is `api_key`,
-`password`, `secret`, `authorization`.
+Shipped values: destructive substrings are `rm -rf`, `format c:`; destructive
+tokens are `rm`, `rmdir`, `del`, `erase`, `unlink`, `shred`, `remove-item`;
+secret patterns are `api_key`, `password`, `secret`, `authorization`.
 
 **Why destructive patterns span tiers.** They name operations that destroy
 state, so a tier is the wrong axis: whether a command runs is a property of the
@@ -98,6 +101,44 @@ two are asserted separately in the tests so they are never conflated.
 that names both replacements. An operator who upgrades gets a loud failure at
 session start rather than a silently inert rule they believe is still enforcing.
 
+## The deletion guard: shell must not bypass deletion control
+
+**The rule.** A command that invokes a destructive program is denied at every
+tool tier, whatever flags it carries: `rm`, `rm -f`, `rm -rf`, `rm -r -f`,
+`rm -fr`, and plain `rm file` are all the same decision. The same holds for
+`rmdir`, `del`, `erase`, `unlink`, `shred`, and `Remove-Item`.
+
+**Why it is a rule and not an accident.** `bash` is a *permitted* tool, and the
+Pi integration has no separate denied delete tool. A deletion performed through
+the shell is therefore reachable no matter which tool names it, so the only
+place it can be stopped is the command itself. An earlier version relied on the
+substring `rm -rf`, which happened to also catch `rm -f` — correct by luck, and
+blind to plain `rm file`. The guard is now expressed as **whole-token matching**
+in `destructiveCommandTokens`, so it is complete by construction and a word that
+merely contains a program name is not caught by accident (`echo charm` and
+`node confirm.js` are allowed).
+
+**Scope boundary.** The guard, like the other command-scope rules, applies to
+command text only. A write whose payload merely *contains* the string `rm -rf`
+is **allowed**, because documenting a command in a runbook or a report is not
+running it. Injected content is still caught, because it arrives inside command
+text: `bash -c "rm -rf /"` and `echo "rm -rf x" | sh` are both denied.
+
+**Scratch cleanup.** When this guard refuses a deletion, the correct response is
+to **overwrite or leave the file, never to delete it**. This is not a
+theoretical restriction: it is why the report-writer skill writes to a new path
+rather than clearing an old one, and why the log-analysis skill never tidies up
+after itself. If a task genuinely cannot proceed without a deletion, that is a
+signal that the workflow needs redesigning, not that the guard should be
+loosened.
+
+**Guardrail, not a sandbox.** This list cannot constrain what an already-permitted
+command does, cannot prevent a deletion performed by a program that reads a
+script, and is not a substitute for OS-level isolation. Path allowlisting,
+secret isolation, and OS-level sandboxing remain deferred work; see
+`docs/SECURITY.md`. Treat this list as a cheap, high-value tripwire, not as the
+security boundary itself.
+
 ## Ordering guarantee
 
 `ConfiguredPolicy.evaluate` runs in the legacy order, and a denial at any step stops
@@ -107,11 +148,12 @@ evaluation:
 2. `allowedTools` (when non-empty)
 3. limits — tool calls per task, then file writes per task
 4. `destructiveCommandPatterns`, against command text
-5. `secretWritePatterns`, against write-tier content payloads
-6. path containment (`WorkspaceBoundary`) and `fileRules`
-7. `maxBytesPerWrite`
+5. `destructiveCommandTokens` (the deletion guard), against command text
+6. `secretWritePatterns`, against write-tier content payloads
+7. path containment (`WorkspaceBoundary`) and `fileRules`
+8. `maxBytesPerWrite`
 
-Only if all seven pass are the counters incremented and the request handed to the
+Only if all eight pass are the counters incremented and the request handed to the
 tier policy (`DefaultPolicy` in `APPROVAL` mode, `TrustedProjectPolicy` in
 `TRUSTED_PROJECT` mode), which is what turns a write into `REQUIRE_APPROVAL` or
 resolves trusted-mode writes to `ALLOW`. The declarative rules can remove a

@@ -47,6 +47,19 @@ export interface PolicyConfig {
    */
   destructiveCommandPatterns: string[];
   /**
+   * Command *programs* refused at every tool tier, matched as whole tokens
+   * rather than as substrings.
+   *
+   * This is the deletion guard, and it exists because `bash` is a permitted
+   * tool and the Pi integration has no separate denied delete tool. A deletion
+   * performed through the shell is therefore reachable no matter which tool
+   * names it, so the only place to stop it is the command itself. Matching
+   * whole tokens is what makes it explicit and complete: `rm`, `rm -f`,
+   * `rm -rf`, `rm -r -f` and plain `rm file` are all the same decision, and a
+   * word that merely contains `rm` is not caught by accident.
+   */
+  destructiveCommandTokens: string[];
+  /**
    * Case-insensitive substrings matched ONLY against the content payload of a
    * write-tier tool.
    *
@@ -180,6 +193,7 @@ export function parsePolicyConfig(raw: unknown, source: string): PolicyConfig {
     allowedTools: stringList(root.allowedTools, source, "allowedTools"),
     fileRules: parseFileRules(root.fileRules, source),
     destructiveCommandPatterns: stringList(root.destructiveCommandPatterns, source, "destructiveCommandPatterns"),
+    destructiveCommandTokens: stringList(root.destructiveCommandTokens, source, "destructiveCommandTokens"),
     secretWritePatterns: stringList(root.secretWritePatterns, source, "secretWritePatterns"),
     limits,
     onViolation,

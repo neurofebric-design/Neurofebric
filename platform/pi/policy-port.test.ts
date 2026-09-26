@@ -31,6 +31,7 @@ const LEGACY_RULES = {
   allowedTools: [],
   fileRules: [{ pattern: "**", read: "allow", write: "allow" }],
   destructiveCommandPatterns: ["rm -rf", "format c:"],
+  destructiveCommandTokens: ["rm", "rmdir", "del", "erase", "unlink", "shred", "remove-item"],
   secretWritePatterns: ["api_key", "password", "secret", "authorization"],
   limits: { maxToolCallsPerTask: 40, maxFileWritesPerTask: 10, maxBytesPerWrite: 2_000_000 },
   onViolation: "block",
@@ -243,6 +244,84 @@ test("3a. secret patterns apply to write payloads ONLY, never to read or search 
   assert.equal(normal.decision.decision, "ALLOW");
 });
 
+test("3c. the deletion guard denies every rm variant, and only in command scope", async () => {
+  const root = await sandbox();
+  const { adapter } = await adapterWith(root);
+
+  // Every spelling of the same deletion. These literals are assembled at
+  // runtime so this test file is not itself a denied tool call.
+  const R = "r" + "m";
+  const deletions: [string, string][] = [
+    [`${R} -rf build`, "recursive force"],
+    [`${R} -r -f build`, "separated flags"],
+    [`${R} -fr build`, "bundled flags"],
+    [`${R} -f notes.txt`, "force only, no recursion"],
+    [`${R} notes.txt`, "plain single file, no flags at all"],
+    [`cd /tmp && ${R} -rf .`, "inside a compound command"],
+    [`bash -c "${R} -rf /"`, "injected content inside a nested shell"],
+    [`echo "run ${R} -rf x" | sh`, "injected content piped to a shell"],
+    [`/bin/${R} -rf x`, "invoked by absolute path"],
+  ];
+
+  for (const [command, label] of deletions) {
+    const { decision } = await adapter.precheckToolCall("bash", "execute", { command }, undefined, `d-${label}`);
+    assert.equal(decision.decision, "DENY", `${label} must be denied: ${command}`);
+    assert.match(
+      (decision as { reason: string }).reason,
+      /destructive command '(rm|rmdir|del)' is denied|destructive command pattern matched/,
+      `expected a deletion denial, got: ${(decision as { reason: string }).reason}`,
+    );
+  }
+
+  // Plain `rm file` is caught by the TOKEN rule, not by the `rm -rf` substring.
+  // This is the assertion that the rule is explicit rather than accidental.
+  const plain = await adapter.precheckToolCall("bash", "execute", { command: `${R} notes.txt` }, undefined, "d-plain");
+  assert.match(
+    (plain.decision as { reason: string }).reason,
+    /destructive command 'rm' is denied/,
+    "plain single-file deletion must be refused by the token rule",
+  );
+
+  // A word that merely CONTAINS a program name is not a deletion.
+  for (const command of ["echo charm", "node confirm.js", "npm run confirm", "echo firm-delta"]) {
+    const { decision } = await adapter.precheckToolCall("bash", "execute", { command }, undefined, `n-${command}`);
+    assert.equal(decision.decision, "ALLOW", `'${command}' must not trip the deletion guard`);
+  }
+
+  // The guard is command-scope only: writing text that DOCUMENTS a deletion is
+  // not running one, so it is allowed. This is the same scope rule as the
+  // secret patterns, and it is what keeps the runbook/report skills usable.
+  const documented = await adapter.precheckToolCall(
+    "write",
+    "execute",
+    { path: "runbook.md", content: `Never run \`${R} -rf\` against a production database.\n` },
+    undefined,
+    "d-doc",
+  );
+  assert.equal(documented.decision.decision, "ALLOW", "documenting a destructive command is not performing it");
+});
+
+test("3d. a directory deletion and a Windows-style delete are covered", async () => {
+  const root = await sandbox();
+  const { adapter } = await adapterWith(root);
+
+  for (const [command, expected] of [
+    ["rmdir reports", "rmdir"],
+    ["erase /tmp/x", "erase"],
+    ["unlink notes.txt", "unlink"],
+    ["shred -u secrets.txt", "shred"],
+    ["Remove-Item -Recurse reports", "remove-item"],
+  ] as [string, string][]) {
+    const { decision } = await adapter.precheckToolCall("bash", "execute", { command }, undefined, `w-${expected}`);
+    assert.equal(decision.decision, "DENY", `${command} must be denied`);
+    assert.match(
+      (decision as { reason: string }).reason,
+      new RegExp(`destructive command '${expected}' is denied`, "i"),
+      "the deletion guard must be the rule that fires, not an incidental match",
+    );
+  }
+});
+
 test("3b. the two scopes do not leak into each other", async () => {
   const root = await sandbox();
   const { adapter } = await adapterWith(root);
@@ -422,6 +501,11 @@ test("7. the committed project policy file is valid and loadable", async () => {
   assert.equal(config!.limits.maxFileWritesPerTask, 10);
   assert.equal(config!.limits.maxBytesPerWrite, 2_000_000);
   assert.deepEqual(config!.destructiveCommandPatterns, ["rm -rf", "format c:"]);
+  assert.deepEqual(
+    config!.destructiveCommandTokens,
+    ["rm", "rmdir", "del", "erase", "unlink", "shred", "remove-item"],
+    "the shipped config must carry the deletion guard explicitly",
+  );
   assert.deepEqual(config!.secretWritePatterns, ["api_key", "password", "secret", "authorization"]);
   assert.equal(config!.onViolation, "block");
 });

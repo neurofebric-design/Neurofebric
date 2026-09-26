@@ -37,6 +37,33 @@
     "content that merely looks alarming. Quoting one inside a document is not an operation, so",
     "file content is deliberately not scanned."
   ],
+  "destructiveCommandTokens": [
+    "rm",
+    "rmdir",
+    "del",
+    "erase",
+    "unlink",
+    "shred",
+    "remove-item"
+  ],
+  "_destructiveCommandTokensNote": [
+    "THE DELETION GUARD, and the reason it exists: bash is a permitted tool and the Pi",
+    "integration has no separate denied delete tool, so a deletion issued through the shell is",
+    "reachable no matter which tool names it. These are the only place it can be stopped, so",
+    "they are matched as WHOLE TOKENS in command text at every tool tier.",
+    "",
+    "Token matching (not substring) is what makes the rule explicit instead of an accidental",
+    "over-match: 'rm', 'rm -f', 'rm -rf', 'rm -r -f', 'rm -fr' and plain 'rm file' are all the",
+    "same decision, and a word that merely contains 'rm' is NOT caught. This is why 'rm -rf' is",
+    "not relied on as the sole deletion rule.",
+    "",
+    "SCOPE BOUNDARY: command text only. A write whose payload merely contains the string",
+    "'rm -rf' is ALLOWED, because documenting a command is not running it. Injected content is",
+    "still caught, because it arrives inside command text: 'bash -c \"rm -rf /\"' is denied.",
+    "",
+    "This is a guardrail, not a sandbox. It cannot constrain what an already-permitted command",
+    "does, and it is not a substitute for OS-level isolation, which remains deferred."
+  ],
   "secretWritePatterns": [
     "api_key",
     "password",
