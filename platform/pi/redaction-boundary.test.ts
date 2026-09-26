@@ -202,7 +202,17 @@ test("redaction does not break the existing execution lifecycle", async () => {
   const adapter = new KernelAdapter({ boundary: new WorkspaceBoundary([root]) });
   adapter.registerTools([WRITE]);
   await adapter.beginTask("produce a report", "produce a report");
-  await adapter.precheckToolCall("write", "execute", { path: target }, undefined, "c1");
+  // An execution binds only on ALLOW. The approving provider stands in for an
+  // operator who authorised this call; nothing about redaction is relaxed, and
+  // the assertions below still require the full lifecycle to complete.
+  const { decision } = await adapter.precheckToolCall(
+    "write",
+    "execute",
+    { path: target },
+    { requestApproval: async () => true },
+    "c1",
+  );
+  assert.equal(decision.decision, "ALLOW", "the lifecycle fixture must be an authorised call");
   adapter.declareToolOutputs("c1", "write", { path: target });
   await adapter.beginToolExecution("c1", "write");
 

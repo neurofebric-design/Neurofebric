@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { KernelAdapter } from "./kernel-adapter.ts";
 import { toolDescriptorFromPi } from "./tool-adapter.ts";
-import { WorkspaceBoundary } from "../core/workspace.ts";
+import { WorkspaceBoundary } from "../core/index.ts";
 
 /**
  * The hallucination guard.
@@ -13,11 +13,22 @@ import { WorkspaceBoundary } from "../core/workspace.ts";
  * Pi reports what a tool said, not what happened on disk. These tests pin the
  * rule that a declared output must actually exist before the task is allowed
  * to complete.
+ *
+ * AUTHORIZATION PRECONDITION. An execution binds only on ALLOW, so these tests
+ * install a policy with an approving provider. That stands in for an operator
+ * who approved the specific call; it does not bypass anything else. In
+ * particular the out-of-workspace case below is still authorized to *run* and
+ * is still marked INVALID by artifact verification, which is the point of having
+ * two independent layers. Authorization and verification are tested separately,
+ * in write-approval.test.ts and policy-port.test.ts respectively.
  */
 
 const WRITE = toolDescriptorFromPi({ name: "write", description: "Write a file" });
 const READ = toolDescriptorFromPi({ name: "read", description: "Read" });
 const BASH = toolDescriptorFromPi({ name: "bash", description: "Run a command" });
+
+/** An operator who approved the call under test. See the note above. */
+const APPROVED = { requestApproval: async () => true };
 
 async function adapterIn(root: string) {
   const adapter = new KernelAdapter({ boundary: new WorkspaceBoundary([root]) });
@@ -34,7 +45,7 @@ test("a write that really produced its declared file is VERIFIED and completes",
   await writeFile(target, "# Report\n", "utf8");
 
   const adapter = await adapterIn(root);
-  await adapter.precheckToolCall("write", "execute", { path: target, content: "# Report\n" }, undefined, "c1");
+  await adapter.precheckToolCall("write", "execute", { path: target, content: "# Report\n" }, APPROVED, "c1");
   adapter.declareToolOutputs("c1", "write", { path: target });
   assert.ok(await adapter.beginToolExecution("c1", "write"));
 
@@ -57,7 +68,7 @@ test("HALLUCINATION: a write reported successful but no file exists must NOT com
   const target = path.join(root, "never-created.png");
 
   const adapter = await adapterIn(root);
-  await adapter.precheckToolCall("write", "execute", { path: target, content: "data" }, undefined, "c1");
+  await adapter.precheckToolCall("write", "execute", { path: target, content: "data" }, APPROVED, "c1");
   adapter.declareToolOutputs("c1", "write", { path: target });
   await adapter.beginToolExecution("c1", "write");
 
@@ -81,7 +92,7 @@ test("a declared artifact outside the workspace is INVALID", async () => {
   await writeFile(outside, "nope", "utf8");
   try {
     const adapter = await adapterIn(root);
-    await adapter.precheckToolCall("write", "execute", { path: outside }, undefined, "c1");
+    await adapter.precheckToolCall("write", "execute", { path: outside }, APPROVED, "c1");
     adapter.declareToolOutputs("c1", "write", { path: outside });
     await adapter.beginToolExecution("c1", "write");
     const validation = await adapter.recordToolResult("c1", "write", { ok: true }, false);
@@ -109,7 +120,7 @@ test("read-only tools and shell commands declare no artifacts and do not block",
 
   // Same for a shell command: no guessing which paths are outputs.
   const adapter2 = await adapterIn(root);
-  await adapter2.precheckToolCall("bash", "execute", { command: "npm test" }, undefined, "b1");
+  await adapter2.precheckToolCall("bash", "execute", { command: "npm test" }, APPROVED, "b1");
   assert.deepEqual(adapter2.declareToolOutputs("b1", "bash", { command: "npm test" }), []);
   await adapter2.beginToolExecution("b1", "bash");
   assert.equal((await adapter2.recordToolResult("b1", "bash", { exitCode: 0 }, false)).status, "VALID");
@@ -127,8 +138,8 @@ test("a failed artifact in one parallel branch is not papered over by a passing 
   // Two parallel writes. c1 is the FAILING one and settles first, so the last
   // result to settle is the passing one — the case that a naive implementation
   // would complete on.
-  await adapter.precheckToolCall("write", "execute", { path: missing }, undefined, "c1");
-  await adapter.precheckToolCall("write", "execute", { path: real }, undefined, "c2");
+  await adapter.precheckToolCall("write", "execute", { path: missing }, APPROVED, "c1");
+  await adapter.precheckToolCall("write", "execute", { path: real }, APPROVED, "c2");
   adapter.declareToolOutputs("c1", "write", { path: missing });
   adapter.declareToolOutputs("c2", "write", { path: real });
   await adapter.beginToolExecution("c1", "write");
@@ -149,14 +160,14 @@ test("recovery after a failed artifact still allows a later successful round", a
   const second = path.join(root, "second.txt");
 
   const adapter = await adapterIn(root);
-  await adapter.precheckToolCall("write", "execute", { path: first }, undefined, "c1");
+  await adapter.precheckToolCall("write", "execute", { path: first }, APPROVED, "c1");
   adapter.declareToolOutputs("c1", "write", { path: first });
   await adapter.beginToolExecution("c1", "write");
   assert.equal((await adapter.recordToolResult("c1", "write", { ok: true }, false)).status, "INVALID");
 
   // Recovery lands on a real planning state; the retry produces the file.
   await writeFile(second, "finally", "utf8");
-  await adapter.precheckToolCall("write", "execute", { path: second }, undefined, "c2");
+  await adapter.precheckToolCall("write", "execute", { path: second }, APPROVED, "c2");
   adapter.declareToolOutputs("c2", "write", { path: second });
   assert.ok(await adapter.beginToolExecution("c2", "write"), "recovery must admit the retry");
   assert.equal((await adapter.recordToolResult("c2", "write", { ok: true }, false)).status, "VALID");
@@ -178,7 +189,7 @@ test("provenance records only what actually ran", async () => {
   const target = path.join(root, "out.json");
   await writeFile(target, "{}", "utf8");
   const adapter = await adapterIn(root);
-  await adapter.precheckToolCall("write", "execute", { path: target }, undefined, "c1");
+  await adapter.precheckToolCall("write", "execute", { path: target }, APPROVED, "c1");
   adapter.declareToolOutputs("c1", "write", { path: target });
   await adapter.beginToolExecution("c1", "write");
   await adapter.recordToolResult("c1", "write", { ok: true }, false);

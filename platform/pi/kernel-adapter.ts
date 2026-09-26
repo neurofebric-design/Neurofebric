@@ -271,13 +271,26 @@ export class KernelAdapter {
     if (required.decision === "REQUIRE_APPROVAL") {
       await this.events.emit(event("APPROVAL_REQUIRED", this.task.taskId, { tool: toolName, toolCallId }));
     }
+
+    // Attempt versus execution.
+    //
+    // Every evaluated call is an ATTEMPT and is recorded as one, whatever the
+    // outcome. An EXECUTION binds only on ALLOW. A DENY, and equally a
+    // REQUIRE_APPROVAL that was never resolved because no approval provider was
+    // available, both mean "not authorised" — and an unauthorised call must
+    // never acquire an execution identity.
+    //
+    // Pi's `tool_call` hook already blocks anything that is not ALLOW, so the
+    // production path was safe. Relying on the caller was still a latent hole:
+    // any embedder that evaluated a call and then ignored the decision would
+    // have executed an unapproved write. The kernel is now independently safe.
+    if (decision.decision !== "ALLOW" && toolCallId) {
+      // Remember the refusal so a later execution_start for this id is ignored
+      // rather than turned into a fake successful execution.
+      this.deniedToolCallIds.add(toolCallId);
+      this.knownToolCallIds.add(toolCallId);
+    }
     if (decision.decision === "DENY") {
-      if (toolCallId) {
-        // Remember the denial so a later execution_start for this id is ignored
-        // rather than turned into a fake successful execution.
-        this.deniedToolCallIds.add(toolCallId);
-        this.knownToolCallIds.add(toolCallId);
-      }
       await this.events.emit(event("APPROVAL_DENIED", this.task.taskId, { tool: toolName, toolCallId, reason: decision.reason }));
       if (decision.violation === "abort") await this.abortTask(decision.reason, toolName, toolCallId);
     }

@@ -178,6 +178,93 @@ test("E. the descriptor carries no permission surface at all", async () => {
   assert.deepEqual(found, [], "a skill with no matching capability is simply not routed to");
 });
 
+/**
+ * Attempt versus execution.
+ *
+ * An execution binds ONLY on ALLOW. A DENY and an unresolved REQUIRE_APPROVAL
+ * are both "not authorised", and neither may acquire an execution identity.
+ * Pi's `tool_call` hook already blocks non-ALLOW decisions, so the kernel is
+ * independently safe rather than relying on the caller to do the right thing.
+ */
+test("G. an execution binds ONLY on ALLOW", async () => {
+  const { adapter, root } = await adapterWith([WRITE_SKILL], "TRUSTED_PROJECT");
+  const target = path.join(root, "report.md");
+
+  // ALLOW -> binds.
+  const allowed = await adapter.precheckToolCall("write", "execute", { path: target, content: "# Report" }, undefined, "a-allow");
+  assert.equal(allowed.decision.decision, "ALLOW");
+  assert.ok(await adapter.beginToolExecution("a-allow", "write"), "an ALLOWed call must bind");
+
+  // DENY -> does not bind. The boundary refuses before the tool ever runs.
+  const denied = await adapter.precheckToolCall("write", "execute", { path: path.join(root, "..", "escape.md"), content: "x" }, undefined, "a-deny");
+  assert.equal(denied.decision.decision, "DENY");
+  assert.equal(await adapter.beginToolExecution("a-deny", "write"), undefined, "a DENYed call must never bind");
+  assert.equal(adapter.activeExecution("a-deny"), undefined);
+
+  // A result arriving for the denied id must not be recorded as a success.
+  const ignored = await adapter.recordToolResult("a-deny", "write", { written: true }, false);
+  assert.equal(ignored.status, "INCONCLUSIVE", "a denied call cannot produce a successful result");
+});
+
+test("H. an unresolved REQUIRE_APPROVAL does not bind", async () => {
+  // Approval mode, no provider supplied: exactly a non-interactive run.
+  const { adapter, root } = await adapterWith([WRITE_SKILL], "APPROVAL");
+  const target = path.join(root, "report.md");
+
+  const { decision } = await adapter.precheckToolCall("write", "execute", { path: target, content: "# Report" }, undefined, "a-pending");
+  assert.equal(decision.decision, "REQUIRE_APPROVAL", "an unauthorised write must not resolve to ALLOW");
+
+  assert.equal(
+    await adapter.beginToolExecution("a-pending", "write"),
+    undefined,
+    "an unresolved approval must fail closed: no execution identity may be acquired",
+  );
+  assert.equal(adapter.activeExecution("a-pending"), undefined);
+
+  // And the attempt is still visible in the trace, so the refusal is auditable
+  // rather than silent.
+  const events = adapter.recentEvents(200).map((event) => event.type);
+  assert.ok(events.includes("APPROVAL_REQUIRED"), "the attempt must be recorded even though nothing bound");
+
+  // Same call, with an approving provider, does bind. The difference is the
+  // authorization, not the tool.
+  const approved = await adapter.precheckToolCall(
+    "write",
+    "execute",
+    { path: target, content: "# Report" },
+    new PiApprovalProvider(true, async () => true),
+    "a-approved",
+  );
+  assert.equal(approved.decision.decision, "ALLOW");
+  assert.ok(await adapter.beginToolExecution("a-approved", "write"), "an approved call binds");
+});
+
+test("I. the extension's block contract and the kernel agree", async () => {
+  // `.pi/extensions/platform-orchestrator.ts` returns { block: true } for any
+  // decision that is not ALLOW. The kernel now refuses the same set
+  // independently, so a caller that forgot would still be safe. This asserts
+  // the two agree on the DENY and REQUIRE_APPROVAL cases.
+  const root = await mkdtemp(path.join(os.tmpdir(), "nf-bind-contract-"));
+
+  for (const [label, mode, expectDecision] of [
+    ["denied boundary escape", "TRUSTED_PROJECT", "DENY"],
+    ["unresolved approval", "APPROVAL", "REQUIRE_APPROVAL"],
+  ] as [string, "TRUSTED_PROJECT" | "APPROVAL", string][]) {
+    const { adapter } = await adapterWith([WRITE_SKILL], mode);
+    const input = label.startsWith("denied")
+      ? { path: path.join(root, "..", "escape.md"), content: "x" }
+      : { path: path.join(root, "report.md"), content: "# Report" };
+    const id = `c-${label}`;
+
+    const { decision } = await adapter.precheckToolCall("write", "execute", input, undefined, id);
+    assert.equal(decision.decision, expectDecision, label);
+    // The extension blocks here...
+    assert.notEqual(decision.decision, "ALLOW", `${label}: the extension must block`);
+    // ...and so does the kernel, without being asked.
+    assert.equal(await adapter.beginToolExecution(id, "write"), undefined, `${label}: the kernel must refuse to bind`);
+  }
+});
+
 test("F. the real project catalog cannot self-authorize either", async () => {
   // report-writer genuinely declares risk: write and genuinely needs the write
   // tool. The point of this test is that even so, the write is still gated.
