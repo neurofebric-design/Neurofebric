@@ -134,10 +134,14 @@ test("duplicate capabilities and duplicate list entries are rejected", () => {
   expectReject([...VALID, "requiredTools:", "  - read", "  - read"], "duplicate entry read in requiredTools");
 });
 
-test("unknown tools are rejected", () => {
+test("unknown required tools are rejected", () => {
   expectReject([...VALID, "requiredTools:", "  - nonexistent"], "unknown tool nonexistent");
-  expectReject([...VALID, "optionalTools:", "  - nonexistent"], "unknown tool nonexistent");
   expectReject([...VALID, "requiredTools:", "  - Read"], "is not valid");
+});
+
+test("unknown optional tools are warned and skipped", () => {
+  const skill = parse([...VALID, "optionalTools:", "  - nonexistent"]);
+  assert.equal(skill.optionalTools.length, 0);
 });
 
 test("a tool cannot be both required and optional", () => {

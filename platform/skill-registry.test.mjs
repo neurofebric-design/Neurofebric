@@ -43,7 +43,7 @@ test("rejects incomplete skill metadata", async () => {
   await writeFile(path.join(root, "broken", "SKILL.md"), "# Missing frontmatter" + NL);
 
   await assert.rejects(
-    () => discoverSkills(root),
+    () => discoverSkills(root, { strict: true }),
     (error) => error.message.includes("missing YAML frontmatter"),
   );
 });
@@ -97,7 +97,7 @@ test("rejects a skill that names a tool the runtime does not have", async () => 
   ].join(NL));
 
   await assert.rejects(
-    () => discoverSkills(root, { knownTools: ["read", "bash"] }),
+    () => discoverSkills(root, { knownTools: ["read", "bash"], strict: true }),
     (error) => error.message.includes("unknown tool"),
   );
 });
@@ -110,7 +110,7 @@ test("rejects a skill whose name does not match its directory", async () => {
   ].join(NL));
 
   await assert.rejects(
-    () => discoverSkills(root),
+    () => discoverSkills(root, { strict: true }),
     (error) => error.message.includes("must match its directory"),
   );
 });
@@ -175,7 +175,7 @@ test("risk and riskLevel are the same field and cannot both be declared", async 
   ].join(NL));
 
   await assert.rejects(
-    () => discoverSkills(root),
+    () => discoverSkills(root, { strict: true }),
     (error) => error.message.includes("not both"),
   );
 });
@@ -190,10 +190,41 @@ test("an invalid risk fails validation with an actionable message", async () => 
     ].join(NL));
 
     await assert.rejects(
-      () => discoverSkills(root),
+      () => discoverSkills(root, { strict: true }),
       (error) => error.message.includes("risk must be one of read, controlled, write")
         && error.message.includes("SKILL.md"),
       `risk '${declared}' must be rejected with the valid values listed`,
     );
   }
+});
+
+test("discoverSkills in non-strict mode skips unknown optional tools and drops invalid required skills without throwing", async () => {
+  const root = await skillRoot();
+  await writeSkill(root, "valid-skill", [
+    "name: valid-skill",
+    "description: Valid skill.",
+    "requiredTools:",
+    "  - read",
+  ].join(NL));
+  await writeSkill(root, "optional-unknown", [
+    "name: optional-unknown",
+    "description: Has an unknown optional tool.",
+    "optionalTools:",
+    "  - nonexistent_opt",
+  ].join(NL));
+  await writeSkill(root, "required-unknown", [
+    "name: required-unknown",
+    "description: Has an unknown required tool.",
+    "requiredTools:",
+    "  - nonexistent_req",
+  ].join(NL));
+
+  const skills = await discoverSkills(root, { knownTools: ["read"] });
+  const names = skills.map((s) => s.name);
+  assert.ok(names.includes("valid-skill"));
+  assert.ok(names.includes("optional-unknown"));
+  assert.equal(names.includes("required-unknown"), false);
+
+  const optSkill = skills.find((s) => s.name === "optional-unknown");
+  assert.equal(optSkill.optionalTools.length, 0);
 });

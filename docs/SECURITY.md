@@ -20,6 +20,10 @@ The orchestrator must never promote tool output into a system instruction or use
 - output and artifact sizes are bounded;
 - external network targets require explicit tool policy.
 
+### Tool Restriction
+
+Tool restriction (e.g. `--tools`) must never bypass the safety layer. Even when tool sets are limited, the orchestrator and kernel policy enforcement remain active and fail-closed. If an extension's skill metadata references an unknown tool, the system emits a warning and safely continues without that skill rather than crashing the extension process itself, ensuring the policy gate remains operational.
+
 ## Secrets
 
 API keys, tokens, passwords, cookies, private keys, and environment secrets must not appear in prompts, traces, errors, artifacts, or provenance. Record redacted metadata only.

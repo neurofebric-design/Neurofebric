@@ -378,24 +378,32 @@ export function validateSkillMetadata(fields: FrontmatterFields, context: SkillV
   );
 
   const knownTools = new Set<string>(context.knownTools === undefined ? [] : context.knownTools);
-  const checkTool = (value: string, field: string): string => {
+  const checkTool = (value: string, field: string, optional: boolean): string | undefined => {
     assertPlainText(value, field, filePath);
     if (!RE_TOOL.test(value)) {
       throw new SkillMetadataError(filePath + ": tool name " + value + " is not valid", field);
     }
     if (knownTools.size > 0 && !knownTools.has(value)) {
+      if (optional) {
+        console.warn(filePath + ": " + field + " names unknown tool " + value + ", skipping");
+        return undefined;
+      }
       throw new SkillMetadataError(filePath + ": " + field + " names unknown tool " + value, field);
     }
     return value;
   };
 
   const requiredTools = rejectDuplicates(
-    asList(fields.requiredTools, "requiredTools", filePath).map((value) => checkTool(value, "requiredTools")),
+    asList(fields.requiredTools, "requiredTools", filePath)
+      .map((value) => checkTool(value, "requiredTools", false)!)
+      .filter((v): v is string => v !== undefined),
     "requiredTools",
     filePath,
   );
   const optionalTools = rejectDuplicates(
-    asList(fields.optionalTools, "optionalTools", filePath).map((value) => checkTool(value, "optionalTools")),
+    asList(fields.optionalTools, "optionalTools", filePath)
+      .map((value) => checkTool(value, "optionalTools", true))
+      .filter((v): v is string => v !== undefined),
     "optionalTools",
     filePath,
   );

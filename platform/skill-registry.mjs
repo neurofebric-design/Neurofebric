@@ -27,6 +27,7 @@ export function skillRiskLevel(skill) {
 const NL = String.fromCharCode(10);
 
 export async function discoverSkills(skillsRoot, options = {}) {
+  const strict = options.strict ?? false;
   const entries = await readdir(skillsRoot, { withFileTypes: true });
   const skills = [];
 
@@ -42,7 +43,9 @@ export async function discoverSkills(skillsRoot, options = {}) {
       }));
     } catch (error) {
       if (error && error.code === "ENOENT") continue;
-      throw error;
+      if (strict) throw error;
+      console.error(`Failed to load skill from ${skillFile}: ${error.message}`);
+      continue;
     }
   }
 

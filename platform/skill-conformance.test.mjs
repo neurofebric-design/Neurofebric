@@ -252,7 +252,7 @@ test("registry discovery rejects a skill that is not structurally conforming", a
   const root = await tempRoot();
   await writeBrokenSkill(root, "Bad-Name", "---" + NL + "name: Bad-Name" + NL + "description: x" + NL + "---" + NL);
   await assert.rejects(
-    () => discoverSkills(root),
+    () => discoverSkills(root, { strict: true }),
     (error) => error.message.includes("kebab-case"),
   );
 });
