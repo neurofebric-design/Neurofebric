@@ -452,7 +452,7 @@ An audit of the 363 OmniRoute upstream models revealed that many prefixes (`aug/
 
 ## D-006: Verification-phase-only raise of `maxFileWritesPerTask` (10 -> 50)
 
-- **Date:** 2025-09-26
+- **Date:** 2026-09-26
 - **Status:** accepted (temporary verification override)
 - **Affects:** gauntlet construction and Step 2 incremental result-recording
 
