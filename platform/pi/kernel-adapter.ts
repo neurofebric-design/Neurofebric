@@ -62,11 +62,10 @@ export interface BoundExecution {
 
 /**
  * States from which a *new* tool execution must not be admitted.
- * RECOVERING/REPLANNING mean the kernel is deciding what to do next,
+ * REPLANNING mean the kernel is deciding what to do next,
  * and the rest are terminal.
  */
 const REFUSED_EXECUTION_STATES: readonly TaskStatus[] = [
-  "RECOVERING",
   "REPLANNING",
   "ESCALATED",
   "COMPLETED",
@@ -74,6 +73,15 @@ const REFUSED_EXECUTION_STATES: readonly TaskStatus[] = [
   "CANCELLED",
   "TIMEOUT",
 ];
+
+function isCleanTerminal(result: unknown): boolean {
+  if (typeof result !== "object" || result === null) return true;
+  const msg = result as any;
+  if (msg.role !== "assistant") return true;
+  const hasContent = Array.isArray(msg.content) && msg.content.some((c: any) => c.type === "text" && c.text && c.text.trim().length > 0);
+  const hasFinishReason = Boolean(msg.finish_reason || msg.stopReason);
+  return hasContent || hasFinishReason;
+}
 
 function event(type: Parameters<EventBus["emit"]>[0]["type"], taskId: string, payload: Record<string, unknown> = {}) {
   return {
@@ -832,8 +840,15 @@ export class KernelAdapter {
       return this.task;
     }
 
-    // No-tool task: the assistant response is the real executed step, so the
-    // response is planned, executed, observed and validated for real.
+    // No-tool task: handle stream death or clean completion
+    if (!isCleanTerminal(finalResult)) {
+      this.task = transitionTask(this.task, "FAILED");
+      const reason = "Stream ended without finish_reason";
+      this.task = { ...this.task, failureReason: reason };
+      await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason }));
+      return this.task;
+    }
+
     const step: PlanStep = {
       stepId: "response",
       description: "Return response",
