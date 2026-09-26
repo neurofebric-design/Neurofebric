@@ -1,4 +1,4 @@
-﻿# Agent Harness Handoff Document
+# Agent Harness Handoff Document
 
 ## 1. Directory Tree
 
@@ -140,7 +140,7 @@ Platform defaults (platform/core/limits.ts):
 | Setting | Default |
 |---|---|
 | maxFileReadsPerTask | 100 |
-| maxFileWritesPerTask | 10 (temporarily 50 for the Verification Gauntlet, see D-004) |
+| maxFileWritesPerTask | 10 (temporarily 50 for the Verification Gauntlet, see D-006) |
 | maxFileReadBytes | 10 MB |
 | maxFileWriteBytes | 1 MB |
 | maxToolExecutionMs | 30 s |

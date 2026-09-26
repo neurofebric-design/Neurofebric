@@ -416,7 +416,7 @@ depend on one. Provider verification is steps 1-3.
 
 ---
 
-## D-003: Verified OmniRoute models and Phase 2 stability rule
+## D-005: Verified OmniRoute models and Phase 2 stability rule
 
 - **Date:** 2025-09-26
 - **Status:** accepted
@@ -450,7 +450,7 @@ An audit of the 363 OmniRoute upstream models revealed that many prefixes (`aug/
 
 ---
 
-## D-004: Verification-phase-only raise of `maxFileWritesPerTask` (10 -> 50)
+## D-006: Verification-phase-only raise of `maxFileWritesPerTask` (10 -> 50)
 
 - **Date:** 2025-09-26
 - **Status:** accepted (temporary verification override)
