@@ -70,6 +70,13 @@ export interface PolicyConfig {
    */
   secretWritePatterns: string[];
   limits: PolicyLimits;
+  /**
+   * Named operator-defined limit overrides, selected via `activeLimitProfile`.
+   * Kept on the parsed config for traceability; `limits` already carries the
+   * merged, effective values.
+   */
+  limitProfiles?: Record<string, Partial<PolicyLimits>>;
+  activeLimitProfile?: string;
   onViolation: OnViolation;
   /** Absolute path of the file this came from, for every decision message. */
   source: string;
@@ -87,6 +94,52 @@ export const EMPTY_POLICY_LIMITS: PolicyLimits = {
   maxFileWritesPerTask: Number.MAX_SAFE_INTEGER,
   maxBytesPerWrite: Number.MAX_SAFE_INTEGER,
 };
+
+/** Profile names follow the same kebab-case convention as skill names. */
+const PROFILE_NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+const LIMIT_KEYS = [
+  "maxToolCallsPerTask",
+  "maxFileWritesPerTask",
+  "maxBytesPerWrite",
+] as const;
+
+/**
+ * Named limit overrides the operator defines in the policy file and selects
+ * with `activeLimitProfile`. Selection is deliberately operator-only (D-004: the
+ * agent never edits its own policy configuration), and an unknown or malformed
+ * selection fails at load, exactly like every other policy field — a profile
+ * that silently does nothing is the same usability bug `deniedContentPatterns`
+ * had.
+ */
+function parseLimitProfiles(value: unknown, source: string): Record<string, Partial<PolicyLimits>> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    fail(source, "limitProfiles must be an object mapping profile names to partial limits", "limitProfiles");
+  }
+  const profiles: Record<string, Partial<PolicyLimits>> = {};
+  for (const [name, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!PROFILE_NAME.test(name)) {
+      fail(source, `limitProfiles '${name}' must be kebab-case`, "limitProfiles");
+    }
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      fail(source, `limitProfiles.${name} must be an object`, `limitProfiles.${name}`);
+    }
+    const entry = raw as Record<string, unknown>;
+    for (const key of Object.keys(entry)) {
+      if (!(LIMIT_KEYS as readonly string[]).includes(key)) {
+        fail(source, `limitProfiles.${name}.${key} is not a known limit (expected one of: ${LIMIT_KEYS.join(", ")})`, `limitProfiles.${name}.${key}`);
+      }
+    }
+    const profile: Partial<PolicyLimits> = {};
+    for (const key of LIMIT_KEYS) {
+      if (entry[key] !== undefined) {
+        profile[key] = positiveInt(entry[key], source, `limitProfiles.${name}.${key}`, 0);
+      }
+    }
+    profiles[name] = profile;
+  }
+  return profiles;
+}
 
 const SUPPORTED_VERSIONS = new Set([1]);
 
@@ -181,11 +234,34 @@ export function parsePolicyConfig(raw: unknown, source: string): PolicyConfig {
   }
 
   const limitsRaw = root.limits === undefined ? {} : record(root.limits, source);
-  const limits: PolicyLimits = {
+  const baseLimits: PolicyLimits = {
     maxToolCallsPerTask: positiveInt(limitsRaw.maxToolCallsPerTask, source, "limits.maxToolCallsPerTask", EMPTY_POLICY_LIMITS.maxToolCallsPerTask),
     maxFileWritesPerTask: positiveInt(limitsRaw.maxFileWritesPerTask, source, "limits.maxFileWritesPerTask", EMPTY_POLICY_LIMITS.maxFileWritesPerTask),
     maxBytesPerWrite: positiveInt(limitsRaw.maxBytesPerWrite, source, "limits.maxBytesPerWrite", EMPTY_POLICY_LIMITS.maxBytesPerWrite),
   };
+
+    // `limitProfiles` is optional; absent means "no profiles defined", which is
+  // distinct from a malformed one.
+  const limitProfiles = root.limitProfiles === undefined ? {} : parseLimitProfiles(root.limitProfiles, source);
+
+  const activeRaw = root.activeLimitProfile;
+  if (activeRaw !== undefined && (typeof activeRaw !== "string" || !PROFILE_NAME.test(activeRaw))) {
+    fail(source, "activeLimitProfile must be a kebab-case profile name", "activeLimitProfile");
+  }
+  const activeLimitProfile = activeRaw as string | undefined;
+
+  // The active profile is merged here, at load time, so `limits` is always the
+  // effective view: enforcement, denial messages, and the trace never need to
+  // know profiles exist. An unknown selection fails closed rather than running
+  // on limits the operator believes were replaced.
+  let limits = baseLimits;
+  if (activeLimitProfile !== undefined) {
+    const profile: Partial<PolicyLimits> | undefined = limitProfiles[activeLimitProfile];
+    if (profile === undefined) {
+      fail(source, `activeLimitProfile '${activeLimitProfile}' matches no entry in limitProfiles`, "activeLimitProfile");
+    }
+    limits = { ...baseLimits, ...profile };
+  }
 
   return {
     version,
@@ -196,6 +272,8 @@ export function parsePolicyConfig(raw: unknown, source: string): PolicyConfig {
     destructiveCommandTokens: stringList(root.destructiveCommandTokens, source, "destructiveCommandTokens"),
     secretWritePatterns: stringList(root.secretWritePatterns, source, "secretWritePatterns"),
     limits,
+    limitProfiles,
+    ...(activeLimitProfile !== undefined ? { activeLimitProfile } : {}),
     onViolation,
     source,
   };
