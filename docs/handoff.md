@@ -1,5 +1,18 @@
 # Agent Harness Handoff Document
 
+## Agent operating rules
+
+Forged 2026-09-26 from three session deaths in one day (F-006, F-007, F-008). Mandatory for every agent session in this repo:
+
+Plan first. Write the planned tool-call sequence before the first call. Budget ~20 calls against the 40-call limit (F-008).
+Never read the same file region twice. One whole-file read is cheaper than three partial reads (F-008).
+No backslash-leading tokens in shell text — not '\r', '\n', '\.git', no escape sequences at all. The path-boundary guard reads them as rooted paths and denies the whole command (F-007). Use file tools or git built-ins instead.
+Prefer file tools over shell for reads and listings. Shell only for git and the test runner.
+One-strike edits. A failed exact-match edit is never retried with the same oldText. One failure → full-file reconstruction, gated by git diff <file> showing changes only in the intended region (F-006).
+A policy denial is never retried. Note it and move on; STOP if it was a required step. Denials have been observed both terminal and non-terminal (F-003, F-007).
+Stay inside the repo. Never read outside the repo root; NEVER modify .pi/neurofebric-policy.json (D-004); no .ps1 files.
+Stop and report on anything unexpected. Do not improvise.
+
 ## 1. Directory Tree
 
 ```
