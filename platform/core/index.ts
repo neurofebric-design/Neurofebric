@@ -13,6 +13,8 @@ export * from "./redaction.ts";
 export * from "./state-machine.ts";
 export * from "./plan.ts";
 export * from "./policy.ts";
+export * from "./policy-config.ts";
+export * from "./configured-policy.ts";
 export * from "./execution.ts";
 export * from "./context-memory.ts";
 export * from "./events.ts";

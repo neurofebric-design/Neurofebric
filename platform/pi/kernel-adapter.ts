@@ -242,6 +242,22 @@ export class KernelAdapter {
     if (!this.task) throw new Error("No active task");
     // Unknown tools are rejected here, before Pi executes anything.
     const tool = this.tools.get(toolName);
+    // A task that policy has aborted, or that has already finished, may not
+    // admit another call. This is what makes `on_violation: abort` stick: the
+    // model can keep asking, and every request is refused.
+    if (REFUSED_EXECUTION_STATES.includes(this.task.status)) {
+      const decision: PolicyDecision = {
+        decision: "DENY",
+        reason: `Task is ${this.task.status}; no further tool calls are accepted`,
+        violation: "block",
+      };
+      if (toolCallId) {
+        this.deniedToolCallIds.add(toolCallId);
+        this.knownToolCallIds.add(toolCallId);
+      }
+      await this.events.emit(event("APPROVAL_DENIED", this.task.taskId, { tool: toolName, toolCallId, reason: decision.reason }));
+      return { decision, task: this.task };
+    }
     // An approval provider must never be able to *replace* the installed trust
     // model. In TRUSTED_PROJECT mode it is ignored outright, so no caller can
     // escalate a hard denial by passing an always-approving provider.
@@ -263,8 +279,40 @@ export class KernelAdapter {
         this.knownToolCallIds.add(toolCallId);
       }
       await this.events.emit(event("APPROVAL_DENIED", this.task.taskId, { tool: toolName, toolCallId, reason: decision.reason }));
+      if (decision.violation === "abort") await this.abortTask(decision.reason, toolName, toolCallId);
     }
     return { decision, task: this.task };
+  }
+
+  /**
+   * Terminate the task because policy said `on_violation: abort`.
+   *
+   * This is the ONE case where policy evaluation is allowed to move the task
+   * lifecycle, and it is what the legacy engine's `on_violation: abort` did:
+   * the violation ends the run rather than letting the agent try something else.
+   * The trace records the rule, the tool, and the reason, so the termination is
+   * visible after the fact and not just as a vanished task.
+   */
+  async abortTask(reason: string, tool?: string, toolCallId?: string): Promise<Task | undefined> {
+    if (!this.task) return undefined;
+    const taskId = this.task.taskId;
+    const policyViolation = { reason, tool, toolCallId, onViolation: "abort" };
+
+    // Already terminal: a second violation must not throw an illegal transition.
+    if (REFUSED_EXECUTION_STATES.includes(this.task.status)) {
+      await this.events.emit(event("POLICY_VIOLATION", taskId, { ...policyViolation, alreadyTerminal: true, taskStatus: this.task.status }));
+      return this.task;
+    }
+
+    await this.events.emit(event("POLICY_VIOLATION", taskId, policyViolation));
+    this.task = transitionTask(this.task, "FAILED", new Date().toISOString());
+    this.task = { ...this.task, failureReason: reason };
+    // Nothing in flight can be trusted to finish correctly after an abort.
+    this.activeExecutions.clear();
+    this.attemptBlocked = true;
+    await this.events.emit(event("POLICY_ABORTED", taskId, { reason, tool, toolCallId }));
+    await this.events.emit(event("TASK_FAILED", taskId, { reason: `Policy abort: ${reason}` }));
+    return this.task;
   }
 
   // ---------------------------------------------------------------------------
@@ -727,6 +775,14 @@ export class KernelAdapter {
 
   async finishTask(finalResult: unknown): Promise<Task> {
     if (!this.task) throw new Error("No active task");
+    // A task that policy aborted, or that has already reached a terminal state,
+    // is reported as it is. Re-running finalisation would either fabricate a
+    // completion or throw an illegal transition.
+    if (this.task.status === "FAILED" || this.task.status === "CANCELLED"
+      || this.task.status === "TIMEOUT" || this.task.status === "ESCALATED"
+      || this.task.status === "COMPLETED") {
+      return this.task;
+    }
     if (this.task.status === "RECOVERING") {
       this.task = transitionTask(this.task, "FAILED");
       await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: "Recovery requires a new planning turn" }));

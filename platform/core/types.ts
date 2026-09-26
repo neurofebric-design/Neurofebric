@@ -18,6 +18,19 @@ export interface Artifact {
   stepId?: string;
   createdAt: string;
   metadata?: Record<string, unknown>;
+  /**
+   * How the reference came to be known. `TOOL_DECLARED` means a tool declared
+   * it as its output; anything inferred is marked as such so provenance is
+   * never overstated.
+   */
+  origin?: "TOOL_DECLARED" | "DERIVED_FROM_INPUT";
+  /**
+   * Trust level. An artifact starts UNVERIFIED and only becomes VERIFIED by an
+   * actual filesystem check, never by being declared.
+   */
+  trust?: "UNVERIFIED" | "VERIFIED" | "INVALID";
+  /** Outcome of the last verification pass, including the checks performed. */
+  verification?: import("./artifact.ts").ArtifactVerification;
 }
 
 export interface Provenance {
@@ -162,8 +175,17 @@ export interface PolicyRequest {
 
 export type PolicyDecision =
   | { decision: "ALLOW" }
-  | { decision: "DENY"; reason: string }
+  | { decision: "DENY"; reason: string; violation?: ViolationAction }
   | { decision: "REQUIRE_APPROVAL"; reason: string };
+
+/**
+ * What a DENY does to the task, from `on_violation` in the declarative policy.
+ *
+ * `block` (default) refuses the call and lets the task continue. `abort`
+ * terminates the task. The kernel acts on this at its single policy choke point,
+ * so an embedder cannot ignore it.
+ */
+export type ViolationAction = "block" | "abort";
 
 export interface ContextSource {
   id: string;

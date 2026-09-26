@@ -4,7 +4,7 @@ import { discoverSkills, formatSkillCatalog } from "../../platform/skill-registr
 import { KernelAdapter } from "../../platform/pi/kernel-adapter.ts";
 import { PiApprovalProvider } from "../../platform/pi/approval.ts";
 import { toolDescriptorFromPi } from "../../platform/pi/tool-adapter.ts";
-import { buildPolicy, loadProjectConfig, type NeurofebricProjectConfig } from "../../platform/pi/project-config.ts";
+import { buildPolicy, loadProjectPolicy, type NeurofebricProjectConfig } from "../../platform/pi/project-config.ts";
 import { createRedactingSink, redactPreview } from "../../platform/core/redaction.ts";
 
 type TraceEntry = {
@@ -35,6 +35,7 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
   // Pi remains the only agent loop; this adapter only translates lifecycle events into kernel state.
   const kernel = new KernelAdapter();
   let config: NeurofebricProjectConfig | undefined;
+  let policySource = "tier policy only";
 
   kernel.events.subscribe((event) => record(event.type, event.payload));
 
@@ -43,9 +44,12 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
   }));
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
-    // Resolve the trust model before any tool call can be evaluated.
-    config = await loadProjectConfig(ctx.cwd);
-    kernel.setPolicy(buildPolicy(config, ctx.cwd));
+    // Resolve the trust model and the declarative policy before any tool call can
+    // be evaluated. A malformed policy file throws here, at startup, by design.
+    const loaded = await loadProjectPolicy(ctx.cwd);
+    config = loaded.config;
+    policySource = loaded.policyConfig ? path.basename(loaded.policyConfig.source) : policySource;
+    kernel.setPolicy(buildPolicy(loaded.config, ctx.cwd, loaded.policyConfig));
 
     const tools = pi.getAllTools().map((tool) => toolDescriptorFromPi({
       name: tool.name,
@@ -61,6 +65,7 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
       skillCount: skills.length,
       policyMode: config.policyMode,
       allowedRoots: config.allowedRoots,
+      policyConfig: policySource,
     });
   });
 
@@ -92,7 +97,17 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
     // once Pi reports the result. `tool_call` is the only lifecycle event that
     // carries the tool input.
     const declared = kernel.declareToolOutputs(event.toolCallId, event.toolName, event.input);
-    record("policy_decision", { tool: event.toolName, toolCallId: event.toolCallId, decision, declaredOutputs: declared.length, taskStatus: kernel.currentTask.status });
+    record("policy_decision", {
+      tool: event.toolName,
+      toolCallId: event.toolCallId,
+      decision,
+      // `violation` is present only on a denial that the declarative policy
+      // escalated with on_violation: abort; the kernel has already terminated
+      // the task by the time this is recorded.
+      violation: decision.decision === "DENY" ? (decision.violation ?? "block") : undefined,
+      declaredOutputs: declared.length,
+      taskStatus: kernel.currentTask.status,
+    });
     if (decision.decision !== "ALLOW") {
       // `decision.reason` is present on both DENY and REQUIRE_APPROVAL.
       return { block: true, reason: decision.reason };

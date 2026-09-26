@@ -90,7 +90,7 @@ export const SECRET_ACCESS_PATTERNS: readonly RegExp[] = [
 ];
 
 /** Every string inside an arbitrary tool input, for pattern scanning. */
-function collectStrings(value: unknown, depth = 0): string[] {
+export function collectStrings(value: unknown, depth = 0): string[] {
   if (depth > 6 || value === null || value === undefined) return [];
   if (typeof value === "string") return [value];
   if (typeof value !== "object") return [];

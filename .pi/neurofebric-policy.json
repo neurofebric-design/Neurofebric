@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "_comment": [
+    "Neurofebric kernel policy. Ported from the legacy harness policies/default_policy.yaml;",
+    "see docs/POLICY_PORT.md for the concept-by-concept mapping and the four places the",
+    "two do not line up. Rules are evaluated in this order and any denial stops evaluation:",
+    "deniedTools -> allowedTools -> limits -> deniedContentPatterns -> paths -> write size.",
+    "These rules can only ever REMOVE a permission. Approval and denial of the tool's risk",
+    "tier is decided by platform/core/policy.ts, which runs afterwards."
+  ],
+  "deniedTools": [],
+  "allowedTools": [],
+  "_allowedToolsNote": [
+    "An empty list means no name-based gating, NOT 'everything is allowed'. Every tool is",
+    "still classified by its risk tier and must clear policy.ts. Name a tool in both lists",
+    "and the deny wins."
+  ],
+  "fileRules": [
+    { "pattern": "**", "read": "allow", "write": "allow" }
+  ],
+  "_fileRulesNote": [
+    "Ordered, first match wins, and the catch-all above means: anything inside the roots",
+    "from .pi/neurofebric.json is fair game. A path that is outside every root, escapes via",
+    ".., or resolves outside through a symlink or junction is denied by the boundary before",
+    "these rules are consulted, so '**' can only ever mean 'inside the root'.",
+    "To lock a subtree down, insert e.g. { \"pattern\": \".env*\", \"read\": \"deny\", \"write\": \"deny\" }",
+    "ABOVE the catch-all."
+  ],
+  "deniedContentPatterns": [
+    "rm -rf",
+    "format c:",
+    "api_key",
+    "password"
+  ],
+  "_deniedContentPatternsNote": [
+    "Case-insensitive substrings matched against every string in the tool input, exactly as",
+    "the legacy engine did. NOTE: this matches ARGUMENTS, not file content, so a grep whose",
+    "pattern argument is 'password' is denied. Remove an entry here if that is too blunt."
+  ],
+  "limits": {
+    "maxToolCallsPerTask": 40,
+    "maxFileWritesPerTask": 10,
+    "maxBytesPerWrite": 2000000
+  },
+  "onViolation": "block"
+}
