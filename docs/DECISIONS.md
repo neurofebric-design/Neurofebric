@@ -414,6 +414,25 @@ node -e "const j=require('fs').readFileSync(process.env.USERPROFILE+'/.pi/agent/
 not record the model provider — by design, since the orchestrator must not
 depend on one. Provider verification is steps 1-3.
 
-**5. No credentials anywhere.** No model call, trace, skill, or source file in
-this repository contains an API key, token, or secret value. The session files
-under `~/.pi/agent/sessions` are outside the repository.
+---
+
+## D-003: Verified OmniRoute models and Phase 2 stability rule
+
+- **Date:** 2025-09-26
+- **Status:** accepted
+- **Affects:** benchmarking and reproducibility
+
+### Context
+
+An audit of the 363 OmniRoute upstream models revealed that many prefixes (`aug/*`, `cfp/*`) either require browser sessions, return 502/STREAM_EARLY_EOF errors, or fail due to unconfigured container transports. Only a small subset of upstreams are stable and functional for headless batch workflows.
+
+### Decision
+
+**All Phase 2 performance benchmarks and headless tasks MUST pin `--provider omni --model auto/gemini`.**
+
+### Rationale
+
+1. **`auto/gemini` is fully verified.** It succeeds headlessly with consistent performance and warm latency around ~11–32 seconds.
+2. **Alternative prefixes are brittle.** `aug/*` upstreams fail with early stream termination, `cfp/*` require headless browser sessions, and other prefixes (`dva`, `cxa`) throw environment or transport errors.
+3. **Reproducibility.** Relying on generic `auto` without pinning can route to different upstreams unpredictably. Explicitly pinning `auto/gemini` ensures deterministic test runs.
+
