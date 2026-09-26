@@ -30,7 +30,8 @@ const LEGACY_RULES = {
   deniedTools: [],
   allowedTools: [],
   fileRules: [{ pattern: "**", read: "allow", write: "allow" }],
-  deniedContentPatterns: ["rm -rf", "format c:", "api_key", "password"],
+  destructiveCommandPatterns: ["rm -rf", "format c:"],
+  secretWritePatterns: ["api_key", "password", "secret", "authorization"],
   limits: { maxToolCallsPerTask: 40, maxFileWritesPerTask: 10, maxBytesPerWrite: 2_000_000 },
   onViolation: "block",
 } as const;
@@ -130,37 +131,142 @@ test("2. a write inside the workspace is allowed; a write outside it is denied w
   assert.match((blocked.decision as { reason: string }).reason, /path rule 'reports\/private\/\*\*' denies write/);
 });
 
-test("3. a content pattern blocks an input containing rm -rf", async () => {
+test("3. a destructive command pattern blocks a command containing rm -rf", async () => {
   const root = await sandbox();
   const { adapter } = await adapterWith(root);
 
   const cases: [string, unknown, string][] = [
     ["bash", { command: "rm -rf node_modules" }, "shell command"],
     ["bash", { command: "echo hi && RM -RF /tmp/x" }, "case-insensitive"],
-    ["write", { path: "notes.md", content: "never run rm -rf here" }, "nested argument"],
-    ["read", { path: "docs/rm -rf.md" }, "a path argument"],
+    ["bash", { command: "cd /tmp && rm -rf ." }, "inside a compound command"],
   ];
 
   for (const [tool, input, label] of cases) {
     const { decision } = await adapter.precheckToolCall(tool, "execute", input, undefined, `c-${label}`);
     assert.equal(decision.decision, "DENY", `${label} must be denied`);
-    assert.match((decision as { reason: string }).reason, /denied content pattern matched: 'rm -rf'/);
+    assert.match((decision as { reason: string }).reason, /destructive command pattern matched: 'rm -rf'/);
   }
 
-  // Every other legacy pattern is enforced too.
-  for (const [pattern, input] of [
-    ["format c:", { command: "format c: /now" }],
-    ["api_key", { command: "curl -d api_key=abc" }],
-    ["password", { command: "cat password.txt" }],
-  ] as [string, unknown][]) {
-    const { decision } = await adapter.precheckToolCall("bash", "execute", input, undefined, `p-${pattern}`);
-    assert.equal(decision.decision, "DENY", `pattern '${pattern}' must be enforced`);
-    assert.match((decision as { reason: string }).reason, new RegExp(`denied content pattern matched: '${pattern}'`));
-  }
+  // The other destructive pattern is enforced too.
+  const format = await adapter.precheckToolCall("bash", "execute", { command: "format c: /now" }, undefined, "c-format");
+  assert.equal(format.decision.decision, "DENY");
+  assert.match((format.decision as { reason: string }).reason, /destructive command pattern matched: 'format c:'/);
 
-  // An innocent call is untouched: the rules do not fire on ordinary work.
+  // An innocent command is untouched.
   const fine = await adapter.precheckToolCall("bash", "execute", { command: "npm test" }, undefined, "c-fine");
   assert.equal(fine.decision.decision, "ALLOW");
+});
+
+test("3a. secret patterns apply to write payloads ONLY, never to read or search arguments", async () => {
+  const root = await sandbox();
+  const { adapter } = await adapterWith(root);
+
+  // The live usability bug: analysis must be able to LOOK for secrets.
+  const searches: [string, unknown, string][] = [
+    ["grep", { pattern: "password", path: "." }, "grep pattern"],
+    ["grep", { pattern: "api_key", path: "config" }, "grep for a key name"],
+    ["read", { path: "docs/secret-handling.md" }, "read a path containing a secret word"],
+    ["read", { path: "notes/passwords.md" }, "read a file named like a secret"],
+    ["find", { pattern: "*.env" }, "find a credential file by suffix"],
+    ["bash", { command: "grep -c password app.log" }, "a read-only shell search"],
+    ["bash", { command: "grep -rn api_key ." }, "a recursive search for a key"],
+    ["ls", { path: "docs/" }, "list a directory"],
+  ];
+
+  for (const [tool, input, label] of searches) {
+    const { decision } = await adapter.precheckToolCall(tool, "execute", input, undefined, `s-${label}`);
+    assert.equal(
+      decision.decision,
+      "ALLOW",
+      `${label} must be allowed: secretWritePatterns must not match read or search arguments`,
+    );
+  }
+
+  // A path literally named for a credential store is still refused, but by the
+  // SEPARATE and pre-existing sensitive-basename control in policy.ts, not by
+  // the secret-write scope. Asserting which rule fired keeps the two from being
+  // conflated later.
+  const credentialDir = await adapter.precheckToolCall("ls", "execute", { path: "secrets/" }, undefined, "s-secrets-dir");
+  assert.equal(credentialDir.decision.decision, "DENY");
+  assert.match(
+    (credentialDir.decision as { reason: string }).reason,
+    /credential file/,
+    "this denial belongs to the sensitive-basename control, not to secretWritePatterns",
+  );
+
+  // But a WRITE that would persist a secret is denied, in every content field.
+  const writes: [unknown, string][] = [
+    [{ path: "notes.md", content: "db password: hunter2" }, "content"],
+    [{ path: "config.json", content: '{"api_key": "abc123"}' }, "an api key in content"],
+    [{ path: "headers.txt", contents: "Authorization: Bearer abc" }, "a header value"],
+    [{ path: "a.md", text: "the client secret" }, "text field"],
+    [{ path: "a.md", body: "my password is x" }, "body field"],
+    [{ path: "a.md", data: "authorization header" }, "data field"],
+    [{ path: "a.md", old_string: "a", new_string: "password" }, "edit new_string"],
+  ];
+
+  for (const [input, label] of writes) {
+    const { decision } = await adapter.precheckToolCall("write", "execute", input, undefined, `w-${label}`);
+    assert.equal(decision.decision, "DENY", `${label} must be denied: a write may not persist a secret`);
+    assert.match(
+      (decision as { reason?: string }).reason ?? "NO-REASON",
+      /secret write pattern matched:/,
+      `decision was ${JSON.stringify(decision)}`,
+    );
+  }
+
+  // A write whose CONTENT is clean is allowed even when its PATH looks alarming.
+  // The path argument is deliberately not scanned: a file named for the concept
+  // is not a secret.
+  const clean = await adapter.precheckToolCall(
+    "write",
+    "execute",
+    { path: "docs/password-policy.md", content: "# Credential handling\nRotate credentials every 90 days.\n" },
+    undefined,
+    "w-clean",
+  );
+  assert.equal(clean.decision.decision, "ALLOW", "the path is not scanned for secrets, only the content");
+
+  // Sanity check on the boundary itself: the SAME path with a secret in the
+  // content IS denied, so the allowance above is about scope, not leniency.
+  const samePathDirty = await adapter.precheckToolCall(
+    "write",
+    "execute",
+    { path: "docs/password-policy.md", content: "db password: hunter2" },
+    undefined,
+    "w-same-path-dirty",
+  );
+  assert.equal(samePathDirty.decision.decision, "DENY");
+
+  // And a clean write is unaffected by the secret rules entirely.
+  const normal = await adapter.precheckToolCall("write", "execute", { path: "reports/summary.md", content: "# Findings\nAll good." }, undefined, "w-normal");
+  assert.equal(normal.decision.decision, "ALLOW");
+});
+
+test("3b. the two scopes do not leak into each other", async () => {
+  const root = await sandbox();
+  const { adapter } = await adapterWith(root);
+
+  // A destructive string inside file CONTENT is not an operation, so it is allowed.
+  const quoted = await adapter.precheckToolCall(
+    "write",
+    "execute",
+    { path: "runbook.md", content: "Never run the recursive delete command; it is dangerous." },
+    undefined,
+    "q1",
+  );
+  assert.equal(quoted.decision.decision, "ALLOW", "documenting a destructive command is not running it");
+
+  // A secret word in a COMMAND that does not persist it is not a write, so the
+  // secret rule does not apply (the destructive rule is checked separately).
+  const search = await adapter.precheckToolCall("bash", "execute", { command: "grep -rn password ." }, undefined, "q2");
+  assert.equal(search.decision.decision, "ALLOW");
+
+  // But a shell command that both searches AND redirects a secret into a file
+  // is still only judged by the command scope; the write tier is what would
+  // catch persistence, and a shell tool is CONTROLLED, not WRITE.
+  const redirect = await adapter.precheckToolCall("bash", "execute", { command: "echo api_key=abc > cfg.txt" }, undefined, "q3");
+  assert.equal(redirect.decision.decision, "ALLOW", "documented scope: shell tools are CONTROLLED, not write-tier");
 });
 
 test("4. the 41st tool call in a task is denied", async () => {
@@ -315,6 +421,7 @@ test("7. the committed project policy file is valid and loadable", async () => {
   assert.equal(config!.limits.maxToolCallsPerTask, 40, "the legacy limit is preserved");
   assert.equal(config!.limits.maxFileWritesPerTask, 10);
   assert.equal(config!.limits.maxBytesPerWrite, 2_000_000);
-  assert.deepEqual(config!.deniedContentPatterns, ["rm -rf", "format c:", "api_key", "password"]);
+  assert.deepEqual(config!.destructiveCommandPatterns, ["rm -rf", "format c:"]);
+  assert.deepEqual(config!.secretWritePatterns, ["api_key", "password", "secret", "authorization"]);
   assert.equal(config!.onViolation, "block");
 });

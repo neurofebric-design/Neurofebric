@@ -40,7 +40,22 @@ export interface PolicyConfig {
   deniedTools: string[];
   allowedTools: string[];
   fileRules: FileRule[];
-  deniedContentPatterns: string[];
+  /**
+   * Case-insensitive substrings matched against COMMAND text only, for every
+   * tool tier. These name operations that destroy state, so they apply wherever
+   * a command is actually about to run.
+   */
+  destructiveCommandPatterns: string[];
+  /**
+   * Case-insensitive substrings matched ONLY against the content payload of a
+   * write-tier tool.
+   *
+   * The restriction to writes is the whole point: a secret must not be
+   * *persisted*, but reading or searching for one is a legitimate analysis
+   * operation. Matching these patterns against a `grep` pattern argument would
+   * block the analysis skills from investigating credential handling at all.
+   */
+  secretWritePatterns: string[];
   limits: PolicyLimits;
   onViolation: OnViolation;
   /** Absolute path of the file this came from, for every decision message. */
@@ -128,6 +143,19 @@ function parseFileRules(value: unknown, source: string): FileRule[] {
  * able to fix it without a debugger.
  */
 export function parsePolicyConfig(raw: unknown, source: string): PolicyConfig {
+  // The unscoped field was the live usability bug fixed in Task 1. Naming the
+  // replacement here is better than silently ignoring the key, which would let
+  // an operator believe a rule is still in force when it is not.
+  if (record(raw, source).deniedContentPatterns !== undefined) {
+    fail(
+      source,
+      "deniedContentPatterns is no longer supported; split it into "
+        + "'destructiveCommandPatterns' (matched against command text) and "
+        + "'secretWritePatterns' (matched against write payloads only)",
+      "deniedContentPatterns",
+    );
+  }
+
   const root = record(raw, source);
   const version = root.version ?? 1;
   if (typeof version !== "number" || !SUPPORTED_VERSIONS.has(version)) {
@@ -151,7 +179,8 @@ export function parsePolicyConfig(raw: unknown, source: string): PolicyConfig {
     deniedTools: stringList(root.deniedTools, source, "deniedTools"),
     allowedTools: stringList(root.allowedTools, source, "allowedTools"),
     fileRules: parseFileRules(root.fileRules, source),
-    deniedContentPatterns: stringList(root.deniedContentPatterns, source, "deniedContentPatterns"),
+    destructiveCommandPatterns: stringList(root.destructiveCommandPatterns, source, "destructiveCommandPatterns"),
+    secretWritePatterns: stringList(root.secretWritePatterns, source, "secretWritePatterns"),
     limits,
     onViolation,
     source,

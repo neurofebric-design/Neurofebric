@@ -18,7 +18,8 @@ test("a valid policy is loaded and normalised", async () => {
     deniedTools: ["bash"],
     allowedTools: ["read", "bash"],
     fileRules: [{ pattern: "**", read: "allow", write: "deny" }],
-    deniedContentPatterns: ["rm -rf"],
+    destructiveCommandPatterns: ["rm -rf"],
+    secretWritePatterns: ["api_key"],
     limits: { maxToolCallsPerTask: 40, maxFileWritesPerTask: 10, maxBytesPerWrite: 2_000_000 },
     onViolation: "abort",
   });
@@ -29,6 +30,8 @@ test("a valid policy is loaded and normalised", async () => {
   assert.deepEqual(config.deniedTools, ["bash"]);
   assert.deepEqual(config.allowedTools, ["read", "bash"]);
   assert.deepEqual(config.fileRules, [{ pattern: "**", read: "allow", write: "deny" }]);
+  assert.deepEqual(config.destructiveCommandPatterns, ["rm -rf"]);
+  assert.deepEqual(config.secretWritePatterns, ["api_key"]);
   assert.equal(config.onViolation, "abort");
   assert.equal(config.limits.maxBytesPerWrite, 2_000_000);
   assert.ok(config.source.endsWith(POLICY_CONFIG_FILE), "the source path is kept for decision messages");
@@ -57,6 +60,10 @@ test("every invalid field is reported with the file and the field name", () => {
     [{ deniedTools: "bash" }, /deniedTools must be an array/],
     [{ deniedTools: ["bash", "bash"] }, /duplicate entry 'bash' in deniedTools/],
     [{ deniedTools: [""] }, /deniedTools must contain non-empty strings/],
+    [{ deniedContentPatterns: ["rm -rf"] }, /deniedContentPatterns is no longer supported/],
+    [{ secretWritePatterns: "api_key" }, /secretWritePatterns must be an array/],
+    [{ destructiveCommandPatterns: [""] }, /destructiveCommandPatterns must contain non-empty strings/],
+    [{ secretWritePatterns: ["a", "a"] }, /duplicate entry 'a' in secretWritePatterns/],
     [{ fileRules: [] }, /fileRules must be a non-empty array/],
     [{ fileRules: [{ pattern: "**", read: "yes", write: "allow" }] }, /fileRules\[0\]\.read must be "allow" or "deny"/],
     [{ fileRules: [{ read: "allow", write: "allow" }] }, /fileRules\[0\]\.pattern must be a non-empty glob/],

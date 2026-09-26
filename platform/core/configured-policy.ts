@@ -1,6 +1,6 @@
 import path from "node:path";
 import { collectStrings } from "./policy.ts";
-import { extractToolPathCandidates } from "./tool-paths.ts";
+import { extractCommandText, extractToolPathCandidates } from "./tool-paths.ts";
 import { globToRegExp, normalizeForMatch, type PolicyConfig, type RuleVerdict } from "./policy-config.ts";
 import { WorkspaceBoundary } from "./workspace.ts";
 import type { PolicyDecision, PolicyEngine, PolicyMode, PolicyRequest } from "./types.ts";
@@ -18,6 +18,21 @@ import type { PolicyDecision, PolicyEngine, PolicyMode, PolicyRequest } from "./
  * a write needs approval. A config file therefore cannot grant a permission that
  * the trust model would otherwise require approval for.
  */
+/**
+ * Argument names that carry the payload a write persists. Used for both the
+ * secret patterns and the write-size limit, so the two always agree on what
+ * "the content" is.
+ */
+const CONTENT_PARAM_NAMES: ReadonlySet<string> = new Set([
+  "content",
+  "contents",
+  "text",
+  "body",
+  "data",
+  "new_string",
+  "old_string",
+]);
+
 export class ConfiguredPolicy implements PolicyEngine {
   readonly mode: PolicyMode;
   private readonly config: PolicyConfig;
@@ -98,14 +113,28 @@ export class ConfiguredPolicy implements PolicyEngine {
       return `${where}: maxFileWritesPerTask exceeded (${this.config.limits.maxFileWritesPerTask})`;
     }
 
-    // 4. Content patterns, as case-insensitive substrings over the whole input.
-    for (const pattern of this.config.deniedContentPatterns) {
-      const needle = pattern.toLowerCase();
-      for (const text of collectStrings(input)) {
-        if (text.toLowerCase().includes(needle)) {
-          return `${where}: denied content pattern matched: '${pattern}'`;
-        }
-      }
+    // 4. Content patterns, each scoped to the payload it is actually about.
+    //
+    //    Destructive patterns are matched against COMMAND text, so they fire
+    //    whatever the tool's tier. Secret patterns are matched only against the
+    //    content a write would persist: searching for a secret is analysis,
+    //    writing one is the hazard.
+    const commandDenial = this.matchIn(
+      this.config.destructiveCommandPatterns,
+      collectStrings(extractCommandText(tool, input)),
+      "destructive command pattern matched",
+      where,
+    );
+    if (commandDenial) return commandDenial;
+
+    if (tool.riskLevel === "WRITE") {
+      const secretDenial = this.matchIn(
+        this.config.secretWritePatterns,
+        this.contentPayloadStrings(input),
+        "secret write pattern matched",
+        where,
+      );
+      if (secretDenial) return secretDenial;
     }
 
     // 5. Paths. Containment is decided by the boundary, not by the rules, so a
@@ -173,6 +202,40 @@ export class ConfiguredPolicy implements PolicyEngine {
     return undefined;
   }
 
+  /** First pattern present in any of `texts`, as a denial reason. */
+  private matchIn(
+    patterns: readonly string[],
+    texts: readonly string[],
+    label: string,
+    where: string,
+  ): string | undefined {
+    for (const pattern of patterns) {
+      const needle = pattern.toLowerCase();
+      for (const text of texts) {
+        if (text.toLowerCase().includes(needle)) {
+          return `${where}: ${label}: '${pattern}'`;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * The content a write would actually PERSIST.
+   *
+   * Only content-bearing arguments are returned. The path and the file mode are
+   * deliberately excluded: a file named `passwords.md` is not a secret, and
+   * neither is a document that happens to discuss secrets.
+   */
+  private contentPayloadStrings(input: unknown): string[] {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) return [];
+    const values: string[] = [];
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+      if (CONTENT_PARAM_NAMES.has(key)) values.push(...collectStrings(value));
+    }
+    return values;
+  }
+
   /**
    * UTF-8 bytes of what the call would actually WRITE.
    *
@@ -181,16 +244,8 @@ export class ConfiguredPolicy implements PolicyEngine {
    * reject writes for reasons that have nothing to do with their size.
    */
   private payloadBytes(request: PolicyRequest): number {
-    const CONTENT_KEYS = ["content", "contents", "text", "body", "data", "new_string", "old_string"];
-    const input = request.input;
-    if (input === null || typeof input !== "object" || Array.isArray(input)) return 0;
-
-    const values: string[] = [];
-    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
-      if (CONTENT_KEYS.includes(key)) values.push(...collectStrings(value));
-    }
-    // A write tool with no recognised content argument has nothing to measure.
-    return values.reduce((total, text) => total + Buffer.byteLength(text, "utf8"), 0);
+    return this.contentPayloadStrings(request.input)
+      .reduce((total, text) => total + Buffer.byteLength(text, "utf8"), 0);
   }
 }
 

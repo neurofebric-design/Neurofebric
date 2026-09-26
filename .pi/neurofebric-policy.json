@@ -4,9 +4,9 @@
     "Neurofebric kernel policy. Ported from the legacy harness policies/default_policy.yaml;",
     "see docs/POLICY_PORT.md for the concept-by-concept mapping and the four places the",
     "two do not line up. Rules are evaluated in this order and any denial stops evaluation:",
-    "deniedTools -> allowedTools -> limits -> deniedContentPatterns -> paths -> write size.",
-    "These rules can only ever REMOVE a permission. Approval and denial of the tool's risk",
-    "tier is decided by platform/core/policy.ts, which runs afterwards."
+    "deniedTools -> allowedTools -> limits -> command patterns -> secret-write patterns ->",
+    "paths -> write size. These rules can only ever REMOVE a permission. Approval and denial",
+    "of the tool's risk tier is decided by platform/core/policy.ts, which runs afterwards."
   ],
   "deniedTools": [],
   "allowedTools": [],
@@ -26,16 +26,30 @@
     "To lock a subtree down, insert e.g. { \"pattern\": \".env*\", \"read\": \"deny\", \"write\": \"deny\" }",
     "ABOVE the catch-all."
   ],
-  "deniedContentPatterns": [
+  "destructiveCommandPatterns": [
     "rm -rf",
-    "format c:",
-    "api_key",
-    "password"
+    "format c:"
   ],
-  "_deniedContentPatternsNote": [
-    "Case-insensitive substrings matched against every string in the tool input, exactly as",
-    "the legacy engine did. NOTE: this matches ARGUMENTS, not file content, so a grep whose",
-    "pattern argument is 'password' is denied. Remove an entry here if that is too blunt."
+  "_destructiveCommandPatternsNote": [
+    "Case-insensitive substrings matched against COMMAND text only (the command, cmd, script,",
+    "shell, shellCommand, args or argv arguments; for a shell tool the whole payload). They",
+    "apply at every tool tier, because these name operations that destroy state rather than",
+    "content that merely looks alarming. Quoting one inside a document is not an operation, so",
+    "file content is deliberately not scanned."
+  ],
+  "secretWritePatterns": [
+    "api_key",
+    "password",
+    "secret",
+    "authorization"
+  ],
+  "_secretWritePatternsNote": [
+    "Case-insensitive substrings matched ONLY against the content payload of a write-tier",
+    "tool (content/contents/text/body/data/new_string/old_string). The restriction to writes",
+    "is the point: a secret must not be PERSISTED, while reading or searching for one is",
+    "ordinary analysis. These are deliberately NOT applied to read or search arguments, so",
+    "a grep for 'password' is allowed. The path argument is not scanned either: a file named",
+    "passwords.md is not a secret."
   ],
   "limits": {
     "maxToolCallsPerTask": 40,
