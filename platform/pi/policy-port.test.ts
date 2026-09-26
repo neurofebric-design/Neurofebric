@@ -411,6 +411,53 @@ test("4b. the file-write and write-size limits are enforced too", async () => {
   assert.equal(justUnder.decision.decision, "ALLOW", "a write under the byte limit is unaffected");
 });
 
+// P1b. The profile merge happens at load time in parsePolicyConfig, so these
+// two tests deliberately go through the real enforcement path instead of
+// asserting on the parsed object. The number in each denial message is the
+// assertion: it can only have been read from the limits the policy engine was
+// actually given.
+
+test("an inactive profile is inert: the base write budget still binds", async () => {
+  const root = await sandbox();
+  const { adapter } = await adapterWith(root, {
+    limits: { maxToolCallsPerTask: 200, maxFileWritesPerTask: 10, maxBytesPerWrite: 1_000_000 },
+    limitProfiles: { gauntlet: { maxFileWritesPerTask: 50 } },
+  });
+
+  for (let call = 1; call <= 10; call += 1) {
+    const { decision } = await adapter.precheckToolCall("write", "execute", { path: "a.md", content: "x" }, undefined, `w-${call}`);
+    assert.equal(decision.decision, "ALLOW", `write ${call} of 10 must be allowed`);
+  }
+
+  // The profile is defined but not selected, so the base budget of 10 is what
+  // enforcement sees: the 11th write is denied AT 10, not at 50.
+  const eleventh = await adapter.precheckToolCall("write", "execute", { path: "a.md", content: "x" }, undefined, "w-11");
+  assert.equal(eleventh.decision.decision, "DENY");
+  assert.match((eleventh.decision as { reason: string }).reason, /maxFileWritesPerTask exceeded \(10\)/);
+});
+
+test("an active profile raises the budget the enforcement actually sees", async () => {
+  const root = await sandbox();
+  const { adapter } = await adapterWith(root, {
+    limits: { maxToolCallsPerTask: 200, maxFileWritesPerTask: 10, maxBytesPerWrite: 1_000_000 },
+    limitProfiles: { gauntlet: { maxFileWritesPerTask: 50 } },
+    activeLimitProfile: "gauntlet",
+  });
+
+  // Write 11 is denied by the test above under the same base limits, so its
+  // allowance here can only have come from the profile being merged in.
+  for (let call = 1; call <= 50; call += 1) {
+    const { decision } = await adapter.precheckToolCall("write", "execute", { path: "a.md", content: "x" }, undefined, `w-${call}`);
+    assert.equal(decision.decision, "ALLOW", `write ${call} of 50 must be allowed`);
+  }
+
+  // 51 is refused at 50: the interpolated value is the merged one, which is
+  // the only way this test could fail if the merge were not reaching the kernel.
+  const fiftyFirst = await adapter.precheckToolCall("write", "execute", { path: "a.md", content: "x" }, undefined, "w-51");
+  assert.equal(fiftyFirst.decision.decision, "DENY");
+  assert.match((fiftyFirst.decision as { reason: string }).reason, /maxFileWritesPerTask exceeded \(50\)/);
+});
+
 test("5. on_violation: abort terminates the task and the trace shows why", async () => {
   const root = await sandbox();
   const { adapter } = await adapterWith(root, { onViolation: "abort" });
