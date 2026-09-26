@@ -366,8 +366,41 @@ export function extractToolPathCandidates(
   }
 
   /** No schema to reason from: keep the old conservative behaviour rather
-   * than silently deciding that a tool has no paths at all. */
-  return expandEncoded(extractPathCandidates(input));
+   * than silently deciding that a tool has no paths at all.
+   *
+   * The name-based pass runs first so that a well-formed `path` argument is
+   * kept WHOLE. Without it, the tokenizer below splits every string on
+   * whitespace, which corrupts a legitimate path containing a space into a
+   * truncated prefix (`C:\Users\Jane Doe\x` -> `C:\Users\Jane`) and that bogus
+   * candidate is then denied as a boundary escape. The tokenizer still runs
+   * over everything it did not consume, so the fallback stays fail-closed. */
+  collectFromObject(input, "heuristic", 0, found);
+  const consumed = new Set([...found.values()].map((operand) => operand.value));
+  for (const candidate of extractPathCandidates(scrubConsumed(input, consumed))) {
+    found.set(candidate, { value: candidate, origin: "scan", kind: "shell" });
+  }
+  return expandEncoded([...found.keys()]);
+}
+
+/**
+ * Replace every string equal to an already-consumed path operand with an empty
+ * string, so the tokenizing fallback cannot re-derive a truncated form of it.
+ * Recursive to match `collectFromObject`, and bounded in depth for the same
+ * reason.
+ */
+function scrubConsumed(value: unknown, consumed: ReadonlySet<string>, depth = 0): unknown {
+  if (depth > 4 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => scrubConsumed(item, consumed, depth + 1));
+
+  const out: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof nested === "string") {
+      out[key] = consumed.has(nested) ? "" : nested;
+      continue;
+    }
+    out[key] = scrubConsumed(nested, consumed, depth + 1);
+  }
+  return out;
 }
 
 /**

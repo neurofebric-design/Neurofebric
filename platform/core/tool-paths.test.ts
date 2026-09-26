@@ -285,3 +285,61 @@ test("OI001: documented residual, encoded traversal in content is not decoded", 
     "encoded text in a content field is inert",
   );
 });
+
+function schemaLessTool(overrides: Partial<ToolDescriptor> = {}): ToolDescriptor {
+  return {
+    name: "write",
+    version: "test",
+    description: "write",
+    // This is the shape `toolDescriptorFromPi` produces: a type with no
+    // `properties`, so path extraction cannot reason from the schema.
+    inputSchema: { type: "object" },
+    outputSchema: { type: "object" },
+    capabilities: [],
+    permissions: [],
+    riskLevel: "WRITE",
+    timeoutMs: 1000,
+    retryPolicy: { maxAttempts: 1, backoffMs: 0, maxBackoffMs: 0 },
+    idempotency: "IDEMPOTENT",
+    sideEffect: "SIDE_EFFECTING",
+    ...overrides,
+  };
+}
+
+test("a schema-less path argument containing a space is not truncated", async () => {
+  // A schema-less input used to send every string through the whitespace
+  // tokenizer, so `C:\Users\Jane Doe\x` was truncated to `C:\Users\Jane` and
+  // that bogus candidate was denied as a boundary escape. The repository's own
+  // suite only passed because the checkout path had no spaces in it.
+  const spaced = await mkdtemp(path.join(os.tmpdir(), "a directory with spaces-"));
+  const tool = schemaLessTool();
+  const inside = path.join(spaced, "reports", "incident.md");
+
+  const candidates = extractToolPathCandidates(tool, { path: inside, content: "# Findings" });
+
+  assert.ok(candidates.includes(inside), `the whole path must survive: ${JSON.stringify(candidates)}`);
+  assert.ok(
+    !candidates.includes(spaced.split(path.sep).slice(0, 3).join(path.sep)),
+    "no truncated prefix may be offered as a candidate",
+  );
+
+  const policy = new TrustedProjectPolicy({ allowedRoots: [spaced] });
+  const request: PolicyRequest = {
+    taskId: "t",
+    tool,
+    operation: "execute",
+    input: { path: inside, content: "# Findings" },
+  };
+  assert.equal(policy.evaluate(request).decision, "ALLOW", JSON.stringify(policy.evaluate(request)));
+});
+
+test("the schema-less fallback still scans what it did not consume as a path", () => {
+  const tool = schemaLessTool({ name: "custom", riskLevel: "READ_ONLY", sideEffect: "PURE" });
+
+  // An unconsumed string is still tokenized, so the fallback stays fail-closed.
+  const candidates = extractToolPathCandidates(tool, { note: "see " + ABSOLUTE + "etc/passwd" });
+  assert.ok(
+    candidates.some((candidate) => candidate.includes("etc")),
+    `an unconsumed string must still be scanned: ${JSON.stringify(candidates)}`,
+  );
+});
