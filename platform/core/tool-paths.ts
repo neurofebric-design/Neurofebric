@@ -113,6 +113,61 @@ const WINDOWS_DRIVE = /^[a-zA-Z]:[\\/]/;
 const VARIABLE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const PERCENT_ENCODED = /%[0-9A-Fa-f]{2}/;
 
+/**
+ * Commands whose leading arguments are patterns or scripts rather than paths.
+ *
+ * `grep PATTERN FILE` does take file operands, so a blanket "skip everything
+ * after a pattern-taking command" rule would be fail-open. Only the positions
+ * below are pattern positions; every other operand of the same command is
+ * still checked, so `grep pattern /etc/passwd` remains a violation.
+ */
+const PATTERN_COMMANDS: ReadonlySet<string> = new Set(["grep", "egrep", "fgrep", "rg", "sed", "awk", "tr"]);
+
+/** The grep family takes its pattern after `-e`; `sed`/`awk` do not. */
+const GREP_FAMILY: ReadonlySet<string> = new Set(["grep", "egrep", "fgrep", "rg"]);
+
+/** What is known about the command segment currently being classified. */
+interface PatternSegment {
+  /** The pattern-taking command of this segment, once one has been seen. */
+  head: string | null;
+  /** True once `-f` was seen: the pattern is a file, so every operand is one. */
+  patternFromFile: boolean;
+  /** True once `-e` was seen: the pattern or script is already supplied. */
+  expressionOption: boolean;
+  /** True while the next token is the value of a `-e`/`--regexp` option. */
+  takeNextAsPattern: boolean;
+  /** True once this command's first positional has been classified. */
+  positionalSeen: boolean;
+}
+
+function newSegment(): PatternSegment {
+  return {
+    head: null,
+    patternFromFile: false,
+    expressionOption: false,
+    takeNextAsPattern: false,
+    positionalSeen: false,
+  };
+}
+
+/**
+ * Whether `token` sits in a pattern position of `segment` and must therefore
+ * never be treated as a path operand. A pattern is a string, whatever it
+ * contains, so this is decided by position and never by token shape.
+ */
+function isPatternPosition(segment: PatternSegment, token: string): boolean {
+  if (segment.head === null) return false;
+  /** `tr` has no file operand: every non-option token is a character set. */
+  if (segment.head === "tr") return true;
+  /** With `-f` the pattern is a file, so every positional is a file. */
+  if (segment.patternFromFile) return false;
+  /** With `-e` the pattern is already supplied, so positionals are files. */
+  if (segment.expressionOption) return false;
+  /** Only the FIRST positional is a pattern; the rest are files. */
+  if (segment.positionalSeen) return false;
+  return true;
+}
+
 /** How an operand was discovered. Useful in traces and in operator-facing errors. */
 export type PathOperandKind = "schema" | "shell";
 
@@ -265,14 +320,47 @@ function decodeOnce(value: string): string {
 }
 
 function extractFromCommand(command: string, origin: string, into: Map<string, PathOperand>): void {
+  /** How the command segment being read is classified. */
+  let segment = newSegment();
+
   for (const token of tokenizeShell(command)) {
     const text = token.text.trim();
     if (text === "") continue;
     if (VARIABLE_ASSIGNMENT.test(text)) continue;
-    if (text.startsWith("-")) continue;
     if (text.includes("://")) continue;
     if (token.redirectTarget && isDevicePath(text)) continue;
 
+    /** The value of `-e`/`--regexp` is a pattern, never a location. */
+    if (segment.takeNextAsPattern) {
+      segment.takeNextAsPattern = false;
+      continue;
+    }
+
+    if (text.startsWith("-")) {
+      if (text === "-f" || text === "--file") segment.patternFromFile = true;
+      if (text === "-e" || text === "--regexp") {
+        segment.expressionOption = true;
+        if (segment.head !== null && GREP_FAMILY.has(segment.head)) segment.takeNextAsPattern = true;
+      }
+      continue;
+    }
+
+    /** `tokenizeShell` emits no token for `|`, `;` or `&&`, so a following
+     * command is recognised by name: a pattern-taking command appearing after
+     * the current one has taken its positional begins the next segment. */
+    if (PATTERN_COMMANDS.has(text) && (segment.head === null || segment.positionalSeen)) {
+      segment = newSegment();
+      segment.head = text;
+      /** The command's own name is not one of its operands. */
+      continue;
+    }
+
+    /** A redirection target is an operand of the shell, not of the command,
+     * so it is never a pattern position and is always checked. */
+    if (!token.redirectTarget && isPatternPosition(segment, text)) {
+      segment.positionalSeen = true;
+      continue;
+    }
     if (looksLikePath(text)) {
       into.set(text, { value: text, origin, kind: "shell" });
       continue;

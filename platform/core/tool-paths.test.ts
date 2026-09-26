@@ -360,5 +360,17 @@ test("OI001: grep patterns and tr options are not path operands (F-007)", async 
   // Fail-closed controls: single-component rooted escapes must also remain denied
   expectDeny(policy, bashTool, { command: "cat \\Windows" }, "single-component rooted escape");
   expectDeny(policy, bashTool, { command: "cat \\secrets.txt" }, "rooted file escape");
+
+  // Fail-closed controls: pattern commands' FILE operands must stay checked
+  expectDeny(policy, bashTool, { command: "grep pattern " + ABSOLUTE + "etc/passwd" }, "grep file operand stays checked");
+  expectDeny(policy, bashTool, { command: "sed s/a/b/ " + ABSOLUTE + "etc/passwd" }, "sed file operand stays checked");
+  expectDeny(
+    policy,
+    bashTool,
+    { command: 'grep -e "\\.git" ' + ABSOLUTE + "etc/passwd" },
+    "grep -e value is a pattern, file operand stays checked",
+  );
+  expectDeny(policy, bashTool, { command: "grep -f " + ABSOLUTE + "pats.txt docs/handoff.md" }, "grep -f value is a file, stays checked");
+  expectDeny(policy, bashTool, { command: "sed -f " + ABSOLUTE + "script.sed docs/handoff.md" }, "sed -f value is a file, stays checked");
 });
 
