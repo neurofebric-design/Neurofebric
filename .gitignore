@@ -35,3 +35,4 @@ coverage/
 *.swp
 
 !tests/fixtures/**/*.log
+.session-archive/
