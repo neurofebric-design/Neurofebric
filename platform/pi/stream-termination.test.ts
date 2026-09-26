@@ -16,7 +16,7 @@ test("stream death never completes task (F-000 regression)", async () => {
 
   const finished = await adapter.finishTask(deadMessage);
   assert.equal(finished.status, "FAILED", "Stream death must never transition task to COMPLETED");
-  assert.equal(finished.failureReason, "Stream ended without finish_reason");
+  assert.equal(finished.failureReason, "Assistant response lacked content or finish_reason");
   assert.ok(adapter.recentEvents().some((e) => e.type === "TASK_FAILED"));
   assert.ok(!adapter.recentEvents().some((e) => e.type === "TASK_COMPLETED"));
 });
@@ -62,4 +62,16 @@ test("tools remain available in RECOVERING; locked in COMPLETED and FAILED", asy
   const completedPrecheck = await adapter.precheckToolCall("read", "read", { path: "test.txt" });
   assert.equal(completedPrecheck.decision.decision, "DENY");
   assert.match(completedPrecheck.decision.reason ?? "", /Task is COMPLETED; no further tool calls are accepted/);
+});
+
+test("untyped result object never completes a task", async () => {
+  const adapter = new KernelAdapter();
+  await adapter.beginTask("Untyped result object", "Untyped result object");
+
+  // Simulate an untyped object that is not a valid assistant message
+  const untypedResult = { status: "ok" };
+
+  const finished = await adapter.finishTask(untypedResult);
+  assert.equal(finished.status, "FAILED", "Untyped result object must never transition task to COMPLETED");
+  assert.equal(finished.failureReason, "Expected assistant response, got role: undefined");
 });

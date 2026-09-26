@@ -75,9 +75,9 @@ const REFUSED_EXECUTION_STATES: readonly TaskStatus[] = [
 ];
 
 function isCleanTerminal(result: unknown): boolean {
-  if (typeof result !== "object" || result === null) return true;
+  if (typeof result !== "object" || result === null) return false;
   const msg = result as any;
-  if (msg.role !== "assistant") return true;
+  if (msg.role !== "assistant") return false;
   const hasContent = Array.isArray(msg.content) && msg.content.some((c: any) => c.type === "text" && c.text && c.text.trim().length > 0);
   const hasFinishReason = Boolean(msg.finish_reason || msg.stopReason);
   return hasContent || hasFinishReason;
@@ -842,8 +842,16 @@ export class KernelAdapter {
 
     // No-tool task: handle stream death or clean completion
     if (!isCleanTerminal(finalResult)) {
+      const msg = finalResult as any;
+      let reason = "Stream ended without finish_reason";
+      if (!msg || typeof msg !== "object") {
+        reason = "Assistant response result was not an object";
+      } else if (msg.role !== "assistant") {
+        reason = `Expected assistant response, got role: ${msg.role}`;
+      } else {
+        reason = "Assistant response lacked content or finish_reason";
+      }
       this.task = transitionTask(this.task, "FAILED");
-      const reason = "Stream ended without finish_reason";
       this.task = { ...this.task, failureReason: reason };
       await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason }));
       return this.task;
