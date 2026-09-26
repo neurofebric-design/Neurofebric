@@ -170,10 +170,34 @@ test("metadata may not smuggle a filesystem path or an escape", () => {
 });
 
 test("a skill may not declare permissions or any unknown key", () => {
-  for (const key of ["permissions", "allowedTools", "authorize", "policy", "risk", "sudo", "escalate"]) {
+  for (const key of ["permissions", "allowedTools", "authorize", "policy", "sudo", "escalate"]) {
     expectReject([...VALID, key + ": true"], "unknown frontmatter key " + key);
   }
   expectReject([...VALID, "permissions:", "  - bash"], "unknown frontmatter key permissions");
+});
+
+test("risk is a descriptive tier, never a permission", () => {
+  // `risk` is accepted, but only as one of three descriptive values. It is
+  // normalised onto the same `riskLevel` field and grants nothing.
+  for (const [declared, expected] of [
+    ["read", "READ_ONLY"],
+    ["controlled", "CONTROLLED"],
+    ["write", "WRITE"],
+  ] as const) {
+    const skill = parse([...VALID, "risk: " + declared]);
+    assert.equal(skill.riskLevel, expected);
+  }
+
+  // An absent declaration means read, not "unlimited".
+  assert.equal(parse(VALID).riskLevel, "READ_ONLY");
+
+  // A risk value that is not a tier is refused, and so is any attempt to use
+  // the field as a switch. DESTRUCTIVE is not available to a skill.
+  for (const declared of ["true", "sudo", "destructive", "WRITE", ""]) {
+    expectReject([...VALID, "risk: " + declared], "risk must be one of");
+  }
+  expectReject([...VALID, "riskLevel: DESTRUCTIVE"], "may not declare riskLevel DESTRUCTIVE");
+  expectReject([...VALID, "risk: read", "riskLevel: WRITE"], "not both");
 });
 
 test("a skill declaring bash is still only metadata", () => {

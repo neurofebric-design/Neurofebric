@@ -38,6 +38,7 @@ export const ALLOWED_FRONTMATTER_KEYS = [
   "dependencies",
   "constraints",
   "riskLevel",
+  "risk",
   "examples",
 ] as const;
 
@@ -54,7 +55,7 @@ const LIST_KEYS: ReadonlySet<string> = new Set([
   "examples",
 ]);
 
-const SCALAR_KEYS: ReadonlySet<string> = new Set(["name", "version", "description", "riskLevel"]);
+const SCALAR_KEYS: ReadonlySet<string> = new Set(["name", "version", "description", "riskLevel", "risk"]);
 
 const KNOWN_RISK_LEVELS: ReadonlySet<string> = new Set<RiskLevel>([
   "READ_ONLY",
@@ -64,6 +65,19 @@ const KNOWN_RISK_LEVELS: ReadonlySet<string> = new Set<RiskLevel>([
 ]);
 
 const ALLOWED_SKILL_RISK: ReadonlySet<string> = new Set<RiskLevel>(["READ_ONLY", "CONTROLLED", "WRITE"]);
+
+/**
+ * The lowercase spelling authors write, mapped onto the kernel's canonical
+ * `RiskLevel`. `risk` and `riskLevel` are two spellings of ONE field, so they
+ * are mutually exclusive rather than independently meaningful.
+ */
+export const SKILL_RISK_BY_NAME: Readonly<Record<string, RiskLevel>> = {
+  read: "READ_ONLY",
+  controlled: "CONTROLLED",
+  write: "WRITE",
+};
+
+export const SKILL_RISK_NAMES: readonly string[] = Object.keys(SKILL_RISK_BY_NAME);
 
 const MAX_DESCRIPTION = 2000;
 const MAX_ITEM_LENGTH = 200;
@@ -302,17 +316,39 @@ export function validateSkillMetadata(fields: FrontmatterFields, context: SkillV
     throw new SkillMetadataError(filePath + ": version must be semantic, for example 1.2.3", "version");
   }
 
-  const riskLevel = asString(fields.riskLevel, "riskLevel", filePath);
-  if (riskLevel !== undefined) {
-    if (!KNOWN_RISK_LEVELS.has(riskLevel)) {
+  const declaredRiskLevel = asString(fields.riskLevel, "riskLevel", filePath);
+  if (declaredRiskLevel !== undefined) {
+    if (!KNOWN_RISK_LEVELS.has(declaredRiskLevel)) {
       throw new SkillMetadataError(
         filePath + ": riskLevel must be one of READ_ONLY, CONTROLLED, WRITE, DESTRUCTIVE",
         "riskLevel",
       );
     }
-    if (!ALLOWED_SKILL_RISK.has(riskLevel)) {
+    if (!ALLOWED_SKILL_RISK.has(declaredRiskLevel)) {
       throw new SkillMetadataError(filePath + ": a skill may not declare riskLevel DESTRUCTIVE", "riskLevel");
     }
+  }
+
+  // `risk: read | controlled | write` is the same classification in the
+  // lowercase spelling used by docs/SKILL_SPEC.md. It normalises onto
+  // `riskLevel` so the kernel and the catalog only ever see one representation.
+  const declaredRisk = asString(fields.risk, "risk", filePath);
+  if (declaredRisk !== undefined && declaredRiskLevel !== undefined) {
+    throw new SkillMetadataError(
+      filePath + ": declare either 'risk' or 'riskLevel', not both; they are the same field",
+      "risk",
+    );
+  }
+  let riskLevel = declaredRiskLevel as RiskLevel | undefined;
+  if (declaredRisk !== undefined) {
+    const mapped = SKILL_RISK_BY_NAME[declaredRisk];
+    if (mapped === undefined) {
+      throw new SkillMetadataError(
+        filePath + ": risk must be one of " + SKILL_RISK_NAMES.join(", ") + "; got '" + declaredRisk + "'",
+        "risk",
+      );
+    }
+    riskLevel = mapped;
   }
 
   const capabilities = rejectDuplicates(
@@ -416,7 +452,7 @@ export function validateSkillMetadata(fields: FrontmatterFields, context: SkillV
     optionalTools,
     dependencies,
     constraints,
-    riskLevel: riskLevel as RiskLevel | undefined,
+    riskLevel,
     examples,
   };
 }

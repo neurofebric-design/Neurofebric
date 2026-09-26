@@ -49,7 +49,7 @@ The enforcement lives in `platform/core/policy.ts`, which classifies the actual 
 
 ## Full Frontmatter Schema
 
-Twelve fields are accepted, matching `SkillDescriptor` exactly. Any other key is a hard error, which is what makes attempts to smuggle in a permission field fail closed rather than being ignored.
+Thirteen fields are accepted, matching `SkillDescriptor` exactly. Any other key is a hard error, which is what makes attempts to smuggle in a permission field fail closed rather than being ignored.
 
 | Field | Shape | Default | Notes |
 | --- | --- | --- | --- |
@@ -63,10 +63,21 @@ Twelve fields are accepted, matching `SkillDescriptor` exactly. Any other key is
 | `optionalTools` | list of tool names | empty | Disjoint from `requiredTools` |
 | `dependencies` | list of skill names | empty | Must resolve within the catalog |
 | `constraints` | list of strings | empty | Advisory text, not enforced limits |
-| `riskLevel` | `READ_ONLY`, `CONTROLLED`, `WRITE` | `READ_ONLY` | A skill may not declare `DESTRUCTIVE` |
+| `risk` | `read`, `controlled`, `write` | `read` | The risk tier of what the skill may do; there is no `destructive` tier for a skill |
+| `riskLevel` | `READ_ONLY`, `CONTROLLED`, `WRITE` | `READ_ONLY` | The same classification in the kernel's spelling |
 | `examples` | list of strings | empty | Short usage hints |
 
-Everything is fail closed. Malformed YAML, a wrong field type, an empty name, a duplicate entry, an unknown tool, an invalid risk level, a malformed version, a value shaped like a path, a self-dependency, an unresolvable dependency, or an unknown key all cause the skill to be rejected. A rejected skill stops discovery rather than being partially loaded, and the rejection is reported with the offending file.
+`risk` and `riskLevel` are two spellings of ONE field. Declaring both is an error, not
+a precedence rule. `risk: read` normalises to `riskLevel: READ_ONLY`, `controlled` to
+`CONTROLLED`, and `write` to `WRITE`; an absent declaration means read. The registry
+exposes the result as `skillRiskLevel(skill)` so no caller reconstructs it. An unknown
+value fails validation and names the accepted values.
+
+The risk tier is a *label*: it is what `/platform` displays and what plan steps are
+annotated with. It grants nothing. Enforcement stays in `platform/core/policy.ts`, which
+classifies the actual tool call.
+
+Everything is fail closed. Malformed YAML, a wrong field type, an empty name, a duplicate entry, an unknown tool, an invalid risk value, a malformed version, a value shaped like a path, a self-dependency, an unresolvable dependency, or an unknown key all cause the skill to be rejected. A rejected skill stops discovery rather than being partially loaded, and the rejection is reported with the offending file.
 
 
 ## Accepted YAML Subset
@@ -110,9 +121,11 @@ A skill may reference Pi built-in tools by name. A custom tool must be registere
 1. Create `skills/<skill-name>/SKILL.md`.
 2. Add valid frontmatter with a specific routing description.
 3. Document purpose, boundaries, inputs, outputs, tools, workflow, and constraints.
-4. Add examples or resources only when they improve execution.
-5. Run the project tests and verify the skill appears in Pi's discovery.
-6. Do not modify the orchestrator for ordinary skill additions.
+4. Add an `examples/` fixture. `platform/skill-conformance.test.mjs` fails the build
+   when a skill is missing one, or missing any of the ten required sections.
+5. Declare `risk` only when the skill genuinely writes or executes; the default is `read`.
+6. Run the project tests and verify the skill appears in Pi's discovery.
+7. Do not modify the orchestrator for ordinary skill additions.
 
 ## Validation
 
