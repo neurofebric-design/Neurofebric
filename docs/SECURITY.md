@@ -22,12 +22,137 @@ The orchestrator must never promote tool output into a system instruction or use
 
 ## Secrets
 
-API keys, tokens, passwords, cookies, private keys, and environment secrets must not appear in prompts, traces, errors, artifacts, or provenance. Record redacted metadata only. A dedicated redaction layer is required before production persistence.
+API keys, tokens, passwords, cookies, private keys, and environment secrets must not appear in prompts, traces, errors, artifacts, or provenance. Record redacted metadata only.
+
+Redaction is centralized in `platform/core/redaction.ts` and is **fail closed**. There is exactly one mechanism; modules do not carry their own secret patterns.
+
+### The boundary
+
+| Path | Enforced by |
+| --- | --- |
+| Every event payload, before it reaches any subscriber or the event history | `EventBus.emit` (cannot be disabled through the bus) |
+| `pi.appendEntry` — the only write into Pi session history | `createRedactingSink` wrapping the extension's sink |
+| Artifact metadata originating from tool output | `createArtifact` |
+| Validation messages derived from tool errors | `KernelAdapter` |
+| Provenance locators | `KernelAdapter` |
+
+Because the event bus is the single choke point, a new event type or a new caller is protected by construction rather than by remembering to sanitize. The persistence sink redacts whatever it is handed, so a future caller cannot bypass the boundary by writing to it directly.
+
+### What it protects
+
+Structured fields whose *name* is credential-like (`api_key`, `token`, `password`, `secret`, `authorization`, `credential`, `client_secret`, `cookie`, and similar) are replaced wholesale, at any nesting depth, in objects, arrays, `Map`s, `Set`s, and `Error`s. Free text is scanned for: PEM private key blocks, URI userinfo (`scheme://user:pass@host` and password-only authorities), `Bearer`/`Basic` headers, JWTs, published provider key prefixes, `name=value` / `name: value` assignments, and high-entropy long tokens.
+
+### What it deliberately does not redact
+
+Content digests, UUIDs, timestamps, artifact ids, file paths, SQL, and ordinary prose are left readable. Redaction is signature- and field-based rather than length-based, because a length heuristic would destroy exactly the provenance data the platform needs. Hex strings longer than 128 characters *are* treated as secret material, since no digest is that long.
+
+### Known limits
+
+- Percent-encoded credentials are handled by decoding and, if the decoded form is sensitive, replacing the whole value. Deeper or non-URL encodings (base64 of a connection string) are not decoded.
+- A secret with no distinguishing signature and no credential-like field name may pass through. The generic long-token rule is the backstop, not a proof.
+- Redaction protects the platform's own output. It does not stop Pi's own transcript from containing a value the model read, and it does not prevent a tool from acting on a secret — only from persisting it through Neurofebric.
+
 
 ## Approval
 
 Approval is an injected interface. Pi UI is an adapter, not part of policy logic. In non-interactive mode, operations requiring approval fail closed.
 
+## Trust Models
+
+The policy mode is selected per project by `.pi/neurofebric.json`. Pi's own project trust is a *different* mechanism: it only controls whether project resources such as extensions and settings load at startup, and it never gates a tool call.
+
+| Mode | Behaviour |
+| --- | --- |
+| `APPROVAL` (default) | `CONTROLLED` and `WRITE` operations return `REQUIRE_APPROVAL` and are confirmed through Pi UI. Non-interactive runs fail closed. |
+| `TRUSTED_PROJECT` | Ordinary development operations resolve to `ALLOW` with no interaction. There is no code path from this mode to a confirmation dialog. |
+
+```json
+{ "policyMode": "TRUSTED_PROJECT", "allowedRoots": ["."] }
+```
+
+A missing or malformed file falls back to `APPROVAL`, so trusted mode is never enabled implicitly.
+
+`TRUSTED_PROJECT` is a different boundary, not a weaker one. It is **fail-closed** and denies, without prompting, anything that matches:
+
+- an unregistered tool (rejected by the tool registry before policy runs);
+- a tool classified `DESTRUCTIVE`;
+- credential material — `.env`, `id_rsa`, `.ssh`, `.aws/credentials`, `.npmrc`, `.git-credentials`, `printenv`, and similar;
+- destructive commands — recursive/forced deletion, disk and filesystem formatting, machine and process control, privilege tampering, registry and VCS history destruction, and `DROP`/`TRUNCATE`/`DELETE FROM`;
+- any path that escapes `allowedRoots`, including `..` traversal, absolute paths outside the root, and symlinks or junctions that resolve out of the root.
+
+Denials are reported to the model instead of stalling the run, so a hostile or mistaken request fails immediately and legibly.
+
+Known limits of this boundary:
+
+- Path detection inside free-form shell text is a conservative detector, not a shell parser. A command that reaches outside the root through a construct it does not recognise may not be caught. The boundary constrains what the platform knowingly authorises; it is not an OS sandbox, and Pi's own documentation is explicit that project trust does not restrict what a permitted command can reach.
+- The `DESTRUCTIVE_PATTERNS` and `SECRET_ACCESS_PATTERNS` lists in `platform/core/policy.ts` are deny lists. They are conservative by design: prefer widening `allowedRoots` over loosening them.
+
+
 ## Deployment Controls
 
 Pi documentation recommends a container, VM, or dedicated user when analyzing untrusted material. Production deployments should combine project trust with OS isolation, scoped credentials, network restrictions, backups, and reviewable audit records.
+
+
+## Open Issues
+
+### OI-001: Policy scanner matched raw string content, producing false denials
+
+**Status:** resolved. Path validation now runs on tool-declared path arguments and shell operands instead of on every string in the payload. Residual limitations are listed below and are real.
+
+`classifyTrustedOperation` in `platform/core/policy.ts` scans *every string reachable from a tool input* with `collectStrings`, and matches patterns against that raw text. The workspace boundary check (`WorkspaceBoundary.checkInput`, via `extractPathCandidates`) inherits the same assumption that any string shaped like a path is a path operand.
+
+Observed live, in `TRUSTED_PROJECT` mode, on ordinary non-malicious input. In the table below, the offending characters are described in words, because writing them literally is itself enough to trigger the defect being reported:
+
+| Input | Observed denial | Reality |
+| --- | --- | --- |
+| A `bash` command redirecting output to the null device (a `2>` redirection followed by `dev/null`) | `path boundary violation:` followed by a single leading slash, then `path escapes the allowed root` | A shell redirection target, not a project path |
+| A source file containing a double forward-slash comment marker | `path boundary violation:` followed by a doubled slash, then `path escapes the allowed root` | Comment syntax, never passed to a shell |
+| A source file containing a backslash followed by `n` inside a string literal | `path boundary violation:` followed by that pair, then `path escapes the allowed root` | An escape sequence, not a path |
+
+The third case is the sharpest: a single backslash-plus-letter pair inside a JavaScript or TypeScript string literal was classified as an absolute path. A working source file was uneditable through the platform's own tools until the text was reworded.
+
+Why it matters: these are **false denials, not false allows**. The failure mode is safe, because a legitimate operation is refused and reported to the model rather than silently permitted. The cost is usability and, more seriously, trust in the policy. An operator who cannot distinguish a real boundary violation from a parser artifact will eventually be tempted to widen `allowedRoots`, and *that* is a genuine weakening.
+
+Scope of a future fix:
+
+1. Prefer structural parsing over content matching. For shell tools, classify redirection targets and flags as shell grammar rather than treating the whole command string as one path-bearing blob.
+2. Restrict path extraction to strings that are plausibly *path operands*, for example values under keys known to carry paths, or tokens produced by tokenising the command, rather than every string reachable from the input.
+3. Where a match can only be produced by raw substring matching, report it as a distinct, clearly labelled decision from a structural workspace-boundary violation, so that the model and the operator can tell the two apart.
+4. Keep the existing deny lists intact. The goal is fewer false *positives*, never fewer true ones.
+
+Constraint on any future change: it must be re-verified against the trusted-execution suite, in particular that credential access (`SECRET_ACCESS_PATTERNS`), destructive commands (`DESTRUCTIVE_PATTERNS`), and workspace escape are still denied. A false positive removed by weakening a pattern is a regression, not a fix.
+
+
+## The Path Model
+
+The workspace boundary answers one question: *may this genuine filesystem path be touched?* It no longer has to guess which strings are paths, because the caller now says so.
+
+`extractToolPathCandidates` in `platform/core/tool-paths.ts` produces path operands in one of two ways, and nothing else contributes a path:
+
+1. **Structured tools.** The tool descriptor carries an input schema, so the argument names are known. Only values under a path-bearing argument name, such as a path, file path, directory, or destination, become operands. A content, pattern, or text argument is never a path source, however much it resembles one.
+2. **Shell tools.** Only operand tokens from a shell-aware tokenizer become operands: flags, variable assignments, URLs, and non-path words are skipped, and redirection targets are marked so they can be handled deliberately.
+
+Anything the runtime cannot classify, a tool with no usable schema, falls back to the previous conservative scan. That fallback is the reason a tool with no declared schema is still protected.
+
+Containment itself is unchanged and remains the authority: lexical resolution, sibling-prefix safety, realpath of the nearest existing ancestor for symlinks and junctions, and case-insensitive comparison on the relevant platforms.
+
+
+## The Command Model
+
+Command *classification* is separate from path *validation*, and the two answer different questions.
+
+Destructive and credential patterns are matched against command text, not against arbitrary payload content. For a shell tool, every string in the input is command text. For a structured tool, only arguments named as commands, such as a command, script, or args field, are treated as command text. A file's content is data. It is not scanned for destructive patterns, and it is not scanned for paths.
+
+This is what allows the platform to write its own source code, including tests that quote a destructive command, while a command that actually runs one is still denied.
+
+
+## Residual Limitations
+
+These are genuine and are not fixed:
+
+1. **No full shell parser.** The tokenizer understands quoting, escaping, operators, redirections, and command substitution by shape. It does not expand variables, evaluate globs, or resolve aliases and functions. A path produced only at runtime, by a shell expansion the tokenizer cannot see, is not a path operand.
+2. **A script written now and executed later.** Writing a file whose contents are destructive is allowed, because writing is not executing. The later `bash script` call sees only the script name. This was equally true before the fix and is not a regression, but it is a real gap: the platform does not link a written file to its future execution.
+3. **Encoded traversal in non-command content is inert.** Percent-encoded traversal is decoded and re-checked when it appears in a path operand or a command operand. The same text inside a document body is not decoded, because it is content.
+4. **Device paths are allowed only as redirection targets.** A small, explicit set of device paths, the null device and the standard stream and file-descriptor nodes, plus the Windows device names, is skipped when it is the target of a redirection. As an ordinary argument such a path is still a real path and is still checked.
+5. **Arguments reached through a tool with no schema** fall back to the conservative scan, so false positives remain possible for such tools until they declare a schema.
+

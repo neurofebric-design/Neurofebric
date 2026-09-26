@@ -1,6 +1,31 @@
 ---
 name: file-analysis
 description: Inspect and analyze a local file, identify problems, and produce an evidence-based report. Use when a user asks what is wrong with a file, asks for a file summary, or needs bounded file inspection.
+version: 1.0.0
+capabilities:
+  - file-inspection
+  - defect-identification
+  - evidence-based-reporting
+supportedInputs:
+  - text/plain
+  - application/json
+  - application/x-ndjson
+supportedOutputs:
+  - text/markdown
+requiredTools:
+  - read
+optionalTools:
+  - grep
+  - find
+  - bash
+constraints:
+  - bounded reads; never load a whole large file into context
+  - report observations separately from hypotheses
+  - keep credentials and personal data out of the report
+examples:
+  - summarise a log file and flag repeated errors
+  - explain what is wrong with a configuration file
+riskLevel: READ_ONLY
 ---
 
 # File Analysis

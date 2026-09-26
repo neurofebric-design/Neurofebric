@@ -1,0 +1,19 @@
+# Deliberately malformed application config, used as a file-analysis example.
+# Findings a bounded inspection should surface:
+#   - duplicate key `port` (second one wins silently)
+#   - a port value that is not an integer
+#   - a placeholder credential that must never be reproduced in a report
+service: checkout-api
+port: 8080
+port: eight-thousand-eighty
+timeout_seconds: 30
+retry_limit: 3
+database:
+  host: db.internal
+  user: checkout
+  password: PLACEHOLDER_NOT_A_REAL_SECRET
+cache:
+  enabled: true
+  ttl_seconds: 0
+logging:
+  level: DEBUG

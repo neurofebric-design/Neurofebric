@@ -39,6 +39,51 @@ Rules:
 - Keep routing metadata concise; detailed procedures belong in the body or linked files.
 - Do not put credentials, tokens, private data, or environment-specific secrets in a skill.
 
+
+## Metadata Is Descriptive, Never Permissive
+
+A skill declares what it *needs* and what it *supports*. It never grants a permission. A skill whose frontmatter lists a tool is a statement about that skill's requirements, not a request that be granted, and not a capability the runtime will honour on the skill's say-so.
+
+The enforcement lives in `platform/core/policy.ts`, which classifies the actual tool call. `platform/core/skill-metadata.ts` produces descriptors that the kernel uses only to label plan steps and answer capability lookups. There is deliberately no code path from a skill descriptor to a policy decision, and a test in `platform/core/skill-metadata.test.ts` pins that invariant: a skill declaring a shell tool does not make a destructive shell command permitted.
+
+
+## Full Frontmatter Schema
+
+Twelve fields are accepted, matching `SkillDescriptor` exactly. Any other key is a hard error, which is what makes attempts to smuggle in a permission field fail closed rather than being ignored.
+
+| Field | Shape | Default | Notes |
+| --- | --- | --- | --- |
+| `name` | kebab-case string | required | Must match the containing directory |
+| `description` | string | required | What it does and when to use it |
+| `version` | semantic version | `0.0.0` | Validated when present |
+| `capabilities` | list of identifiers | empty | Must be unique |
+| `supportedInputs` | list of type tokens | empty | Types such as `text/plain`, never paths |
+| `supportedOutputs` | list of type tokens | empty | Types, never paths |
+| `requiredTools` | list of tool names | empty | Unknown tool names are rejected |
+| `optionalTools` | list of tool names | empty | Disjoint from `requiredTools` |
+| `dependencies` | list of skill names | empty | Must resolve within the catalog |
+| `constraints` | list of strings | empty | Advisory text, not enforced limits |
+| `riskLevel` | `READ_ONLY`, `CONTROLLED`, `WRITE` | `READ_ONLY` | A skill may not declare `DESTRUCTIVE` |
+| `examples` | list of strings | empty | Short usage hints |
+
+Everything is fail closed. Malformed YAML, a wrong field type, an empty name, a duplicate entry, an unknown tool, an invalid risk level, a malformed version, a value shaped like a path, a self-dependency, an unresolvable dependency, or an unknown key all cause the skill to be rejected. A rejected skill stops discovery rather than being partially loaded, and the rejection is reported with the offending file.
+
+
+## Accepted YAML Subset
+
+The parser is deliberately small rather than general, because the exotic parts of YAML are exactly the ambiguous ones. Supported: a key with a scalar value, a key followed by dash-prefixed block sequence items, comments, and single or double quoted scalars.
+
+Refused: tabs, anchors, aliases, tags, directives, block scalars, flow collections, nested mappings, and duplicate keys. There is no YAML library dependency, so the accepted grammar is exactly what this parser implements.
+
+
+## Where These Rules Are Enforced
+
+- Parsing and validation: `platform/core/skill-metadata.ts`
+- Discovery and catalog assembly: `platform/skill-registry.mjs`
+- Descriptor shaping and capability lookup: `platform/core/skill-catalog.ts`
+- Authoritative safety decisions: `platform/core/policy.ts`
+- Tests: `platform/core/skill-metadata.test.ts` and `platform/skill-registry.test.mjs`
+
 ## Required Sections
 
 Each `SKILL.md` should define:

@@ -1,0 +1,4 @@
+{
+  "policyMode": "TRUSTED_PROJECT",
+  "allowedRoots": ["."]
+}

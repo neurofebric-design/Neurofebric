@@ -1,11 +1,174 @@
+import path from "node:path";
 import { CoreError } from "./errors.ts";
+import { extractPathCandidates, WorkspaceBoundary } from "./workspace.ts";
+import { extractCommandText, extractToolPathCandidates } from "./tool-paths.ts";
 import type { PolicyDecision, PolicyRequest } from "./types.ts";
 
 export interface ApprovalProvider {
   requestApproval(request: PolicyRequest): Promise<boolean>;
 }
 
-export class DefaultPolicy {
+/**
+ * The contract both policy implementations satisfy.
+ *
+ * `APPROVAL` mode may return `REQUIRE_APPROVAL` and consult an approval
+ * provider. `TRUSTED_PROJECT` mode never returns `REQUIRE_APPROVAL` and never
+ * consults one — it resolves to `ALLOW` or `DENY`.
+ */
+export interface PolicyEngine {
+  readonly mode: PolicyMode;
+  evaluate(request: PolicyRequest): PolicyDecision;
+  evaluateWithApproval(request: PolicyRequest): Promise<PolicyDecision>;
+}
+
+export type PolicyMode = "APPROVAL" | "TRUSTED_PROJECT";
+
+/**
+ * Command shapes that are refused outright in trusted-project mode.
+ *
+ * These are matched against the command string as a whole, case-insensitively.
+ * The list targets irreversible system/state destruction and credential access,
+ * not "unusual" commands. It is intentionally a deny list so that ordinary
+ * development commands keep working without prompting.
+ */
+export const DESTRUCTIVE_PATTERNS: readonly RegExp[] = [
+  // Recursive / forced deletion.
+  /\brm\s+(-[a-z]*\s+)*-[a-z]*[rf][a-z]*\b/i,
+  /\brm\s+-[a-z]*r[a-z]*f/i,
+  /\brmdir\b.*\/s/i,
+  /\bdel\b.*\/[a-z]*s/i,
+  /\bRemove-Item\b.*-Recurse/i,
+  /\berase\b.*\/[a-z]*s/i,
+  // Disk and filesystem-level destruction.
+  /\bmkfs(\.\w+)?\b/i,
+  /\bformat\s+[a-z]:/i,
+  /\bdd\s+if=/i,
+  /\bdiskpart\b/i,
+  /\bDisk\.Format/i,
+  // Process and machine control.
+  /:\(\)\s*\{\s*:\|:&\s*\}\s*;\s*:/,
+  /\b(shutdown|halt|reboot|poweroff)\b/i,
+  /\bStop-Process\b/i,
+  /\bkillall\b/i,
+  /\btaskkill\b.*\/f/i,
+  // Privilege and ownership tampering.
+  /\b(takeown|icacls)\b/i,
+  /\bchmod\s+(-[a-z]+\s+)*777\b/i,
+  /\bchown\s+-R\s+root/i,
+  // Registry / VCS history destruction.
+  /\breg\s+delete\b/i,
+  /\bgit\s+push\b.*--force(?!-with-lease)/i,
+  /\bgit\s+reset\s+--hard\b/i,
+  /\bgit\s+clean\b.*-[a-z]*f/i,
+  // Data-layer destruction.
+  /\bdrop\s+(database|table|schema)\b/i,
+  /\btruncate\s+table\b/i,
+  /\bdelete\s+from\b/i,
+];
+
+export const SECRET_ACCESS_PATTERNS: readonly RegExp[] = [
+  // Credential material by filename.
+  /(^|[\s/\\"'`=])\.env(\.[a-z]+)?\b/i,
+  /\bid_rsa\b/i,
+  /\bid_ed25519\b/i,
+  /\b\.ssh\b/i,
+  /\.aws[\s/\\]credentials/i,
+  /\.npmrc\b/i,
+  /\.netrc\b/i,
+  /\.pypirc\b/i,
+  /\.docker[\s/\\]config\.json/i,
+  /credentials\.json/i,
+  /\.git-credentials\b/i,
+  /(^|[\s/\\])\.htpasswd\b/i,
+  // Credential dumping from the environment or keychain.
+  /\bprintenv\b/i,
+  /\bGet-ChildItem\s+Env:/i,
+  /\bsetx\b/i,
+  /secretstore|keychain|\bsecurity\s+find-generic-password\b/i,
+  // Unix shadow file.
+  /\/etc\/(shadow|gshadow|sudoers)\b/i,
+];
+
+/** Every string inside an arbitrary tool input, for pattern scanning. */
+function collectStrings(value: unknown, depth = 0): string[] {
+  if (depth > 6 || value === null || value === undefined) return [];
+  if (typeof value === "string") return [value];
+  if (typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectStrings(item, depth + 1));
+  return Object.values(value as Record<string, unknown>).flatMap((item) => collectStrings(item, depth + 1));
+}
+
+function firstMatch(value: unknown, patterns: readonly RegExp[]): RegExp | undefined {
+  for (const text of collectStrings(value)) {
+    for (const pattern of patterns) {
+      pattern.lastIndex = 0;
+      if (pattern.test(text)) return pattern;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Basenames that are credential material regardless of the directory holding
+ * them.
+ *
+ * `SECRET_ACCESS_PATTERNS` matches `.env` only when it begins a path component,
+ * so it misses `config/app.env`, `deploy/prod.env`, and similar. These are
+ * checked against the basename of every path-like value in the request.
+ */
+const SENSITIVE_BASENAMES: readonly RegExp[] = [
+  /^\.env(\..+)?$/i,
+  /\.env$/i,
+  /^\.env$/i,
+  /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
+  /^\.?(netrc|npmrc|pypirc|git-credentials|htpasswd|kubeconfig)$/i,
+  /^credentials(\.json|\.yaml|\.yml)?$/i,
+  /^secrets?(\.json|\.yaml|\.yml)?$/i,
+];
+
+/** True when any path-like value in the request has a sensitive basename. */
+export function sensitiveBasenameMatch(input: unknown, candidates?: readonly string[]): string | undefined {
+  for (const candidate of candidates ?? extractPathCandidates(input)) {
+    const base = path.basename(candidate.replace(/\\/g, "/"));
+    for (const pattern of SENSITIVE_BASENAMES) {
+      if (pattern.test(base)) return base;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Classify a request for trusted-project mode.
+ *
+ * Returns a denial reason, or `undefined` when the operation is ordinary
+ * development work that may proceed without interaction.
+ */
+export function classifyTrustedOperation(request: PolicyRequest, boundary: WorkspaceBoundary): string | undefined {
+  const { tool, input } = request;
+
+  // A destructive-classified tool is never auto-executed.
+  if (tool.riskLevel === "DESTRUCTIVE") return `tool '${tool.name}' is classified DESTRUCTIVE`;
+
+  const candidates = extractToolPathCandidates(tool, input);
+  const commandText = extractCommandText(tool, input);
+
+  const basename = sensitiveBasenameMatch(input, candidates);
+  if (basename) return `operation targets credential file '${basename}'`;
+
+  const secret = firstMatch(commandText, SECRET_ACCESS_PATTERNS);
+  if (secret) return `operation touches credential material (matched ${secret.source})`;
+
+  const destructive = firstMatch(commandText, DESTRUCTIVE_PATTERNS);
+  if (destructive) return `command is destructive (matched ${destructive.source})`;
+
+  const escape = boundary.checkCandidates(candidates);
+  if (!escape.allowed) return `path boundary violation: ${escape.reason}`;
+
+  return undefined;
+}
+
+export class DefaultPolicy implements PolicyEngine {
+  readonly mode: PolicyMode = "APPROVAL";
   private readonly approval?: ApprovalProvider;
 
   constructor(approval?: ApprovalProvider) {
@@ -33,6 +196,44 @@ export class DefaultPolicy {
     if (!this.approval) return decision;
     const approved = await this.approval.requestApproval(request);
     return approved ? { decision: "ALLOW" } : { decision: "DENY", reason: "Approval denied" };
+  }
+}
+
+/**
+ * Trusted-project policy.
+ *
+ * For a local development project the operator has already granted standing
+ * consent, so ordinary operations resolve to `ALLOW` with no interaction at
+ * all — there is no code path from this policy to a confirmation prompt.
+ *
+ * This is not a weakened boundary. It is a different, fail-closed one:
+ *   - unregistered tools are rejected upstream by the ToolRegistry;
+ *   - paths outside the approved roots are denied;
+ *   - credential access and destructive commands are denied outright.
+ *
+ * Because these are denials rather than prompts, a hostile or mistaken request
+ * fails immediately and is reported to the model instead of stalling the run.
+ */
+export class TrustedProjectPolicy implements PolicyEngine {
+  readonly mode: PolicyMode = "TRUSTED_PROJECT";
+  private readonly boundary: WorkspaceBoundary;
+
+  constructor(options: { allowedRoots: string[] }) {
+    this.boundary = new WorkspaceBoundary(options.allowedRoots);
+  }
+
+  evaluate(request: PolicyRequest): PolicyDecision {
+    const denial = classifyTrustedOperation(request, this.boundary);
+    if (denial) return { decision: "DENY", reason: `Neurofebric policy: ${denial}` };
+    return { decision: "ALLOW" };
+  }
+
+  /**
+   * Present for interface compatibility. Any approval provider is deliberately
+   * ignored: trusted-project mode never escalates to a human.
+   */
+  async evaluateWithApproval(request: PolicyRequest): Promise<PolicyDecision> {
+    return this.evaluate(request);
   }
 }
 

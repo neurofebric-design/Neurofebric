@@ -1,9 +1,11 @@
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { discoverSkills } from "../../platform/skill-registry.mjs";
+import { discoverSkills, formatSkillCatalog } from "../../platform/skill-registry.mjs";
 import { KernelAdapter } from "../../platform/pi/kernel-adapter.ts";
 import { PiApprovalProvider } from "../../platform/pi/approval.ts";
 import { toolDescriptorFromPi } from "../../platform/pi/tool-adapter.ts";
+import { buildPolicy, loadProjectConfig, type NeurofebricProjectConfig } from "../../platform/pi/project-config.ts";
+import { createRedactingSink, redactPreview } from "../../platform/core/redaction.ts";
 
 type TraceEntry = {
   type: string;
@@ -14,12 +16,11 @@ type TraceEntry = {
 const trace: TraceEntry[] = [];
 let persistTrace: ((entry: TraceEntry) => void) | undefined;
 
-function redactPreview(value: string): string {
-  return value
-    .replace(/\b(api[_ -]?key|token|password|secret|authorization)\s*[:=]\s*\S+/gi, "$1=[REDACTED]")
-    .slice(0, 160);
-}
-
+/**
+ * Redact on the way IN, before the entry is buffered, and again on the way OUT
+ * through the persistence sink. The sink is wrapped once here so that no caller
+ * — including a future one — can write an unredacted entry to session history.
+ */
 function record(type: string, details?: Record<string, unknown>): void {
   const entry: TraceEntry = { type, timestamp: new Date().toISOString(), details };
   trace.push(entry);
@@ -28,9 +29,12 @@ function record(type: string, details?: Record<string, unknown>): void {
 }
 
 export default function platformOrchestrator(pi: ExtensionAPI): void {
-  persistTrace = (entry) => pi.appendEntry("platform-trace", entry);
+  // The ONLY write path into Pi session history. It is wrapped in the shared
+  // redactor so nothing can bypass sanitization by calling appendEntry here.
+  persistTrace = createRedactingSink((entry: TraceEntry) => pi.appendEntry("platform-trace", entry));
   // Pi remains the only agent loop; this adapter only translates lifecycle events into kernel state.
   const kernel = new KernelAdapter();
+  let config: NeurofebricProjectConfig | undefined;
 
   kernel.events.subscribe((event) => record(event.type, event.payload));
 
@@ -39,28 +43,25 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
   }));
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
+    // Resolve the trust model before any tool call can be evaluated.
+    config = await loadProjectConfig(ctx.cwd);
+    kernel.setPolicy(buildPolicy(config, ctx.cwd));
+
     const tools = pi.getAllTools().map((tool) => toolDescriptorFromPi({
       name: tool.name,
       description: tool.description,
       parameters: tool.parameters,
     }));
     kernel.registerTools(tools);
-    const skills = await discoverSkills(path.join(ctx.cwd, "skills"));
-    kernel.setSkills(skills.map((skill) => ({
-      name: skill.name,
-      version: "0.0.0",
-      description: skill.description,
-      capabilities: [],
-      supportedInputs: [],
-      supportedOutputs: [],
-      requiredTools: [],
-      optionalTools: [],
-      dependencies: [],
-      constraints: [],
-      riskLevel: "READ_ONLY" as const,
-      examples: [],
-    })));
-    record("session_start", { toolCount: tools.length, skillCount: skills.length });
+    const knownTools = tools.map((tool) => tool.name);
+    const skills = await discoverSkills(path.join(ctx.cwd, "skills"), { knownTools });
+    kernel.setSkills(skills);
+    record("session_start", {
+      toolCount: tools.length,
+      skillCount: skills.length,
+      policyMode: config.policyMode,
+      allowedRoots: config.allowedRoots,
+    });
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
@@ -74,11 +75,24 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
   // ONLY and must never mutate the kernel task lifecycle.
   pi.on("tool_call", async (event, ctx) => {
     if (!kernel.currentTask) return undefined;
-    const approval = new PiApprovalProvider(ctx.hasUI, async (prompt) => {
-      return (await ctx.ui.confirm("Neurofebric policy approval", prompt)) === true;
-    });
+
+    // In TRUSTED_PROJECT mode the kernel policy returns ALLOW or DENY and never
+    // escalates, so no approval provider is constructed and no confirmation
+    // dialog can be raised. This is the code path that used to prompt
+    // "Neurofebric policy approval" for every bash/edit/write call.
+    const trusted = kernel.policy.mode === "TRUSTED_PROJECT";
+    const approval = trusted
+      ? undefined
+      : new PiApprovalProvider(ctx.hasUI, async (prompt) => {
+        return (await ctx.ui.confirm("Neurofebric policy approval", prompt)) === true;
+      });
+
     const { decision } = await kernel.precheckToolCall(event.toolName, "execute", event.input, approval, event.toolCallId);
-    record("policy_decision", { tool: event.toolName, toolCallId: event.toolCallId, decision, taskStatus: kernel.currentTask.status });
+    // Capture the output references this call declares so they can be verified
+    // once Pi reports the result. `tool_call` is the only lifecycle event that
+    // carries the tool input.
+    const declared = kernel.declareToolOutputs(event.toolCallId, event.toolName, event.input);
+    record("policy_decision", { tool: event.toolName, toolCallId: event.toolCallId, decision, declaredOutputs: declared.length, taskStatus: kernel.currentTask.status });
     if (decision.decision !== "ALLOW") {
       // `decision.reason` is present on both DENY and REQUIRE_APPROVAL.
       return { block: true, reason: decision.reason };
@@ -106,7 +120,7 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
     // Pi owns the actual result shape; the kernel normalizes it against the
     // bound execution identity so task/step correlation cannot drift.
     await kernel.recordToolResult(event.toolCallId, event.toolName, event.result, event.isError);
-    record("tool_execution_end", { toolCallId: event.toolCallId, tool: event.toolName, isError: event.isError, taskStatus: kernel.currentTask.status });
+    record("tool_execution_end", { toolCallId: event.toolCallId, tool: event.toolName, isError: event.isError, artifacts: kernel.artifacts.length, taskStatus: kernel.currentTask.status });
   });
 
   pi.on("agent_end", async (event) => {
@@ -121,7 +135,14 @@ export default function platformOrchestrator(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       const task = kernel.currentTask;
       const events = kernel.recentEvents().slice(-10).map((event) => `${event.timestamp} ${event.type}`).join("\n");
-      const status = task ? `Task ${task.taskId}: ${task.status}` : "No active task";
+      const mode = config ? `${config.policyMode} (roots: ${config.allowedRoots.join(", ")})` : kernel.policy.mode;
+      const skillSummary = formatSkillCatalog(kernel.skills);
+      const artifacts = kernel.artifacts.length
+        ? kernel.artifacts.map((a) => `- ${a.reference} [${a.type}] ${a.trust}`).join("\n")
+        : "- No artifacts recorded.";
+      const status = `${task ? `Task ${task.taskId}: ${task.status}` : "No active task"}\nPolicy: ${mode}\nArtifacts:\n${artifacts}
+Skills:
+${skillSummary}`;
       ctx.ui.notify(`${status}\n\nRecent events:\n${events || "No events yet"}`, "info");
     },
   });

@@ -1,0 +1,389 @@
+import { extractPathCandidates } from "./workspace.ts";
+import type { ToolDescriptor } from "./types.ts";
+
+/**
+ * Which strings in a tool input are actually filesystem paths.
+ *
+ * This module answers that question, and nothing else. Deciding whether a
+ * genuine path may be touched is the job of `WorkspaceBoundary`; this file
+ * only decides what counts as a path in the first place.
+ *
+ * The distinction matters. A tool call payload mixes genuine paths with
+ * document content, search patterns, regular expressions, URLs and shell
+ * syntax. Treating every one of them as a path made the boundary deny
+ * ordinary work, because a slash in prose is not a path.
+ *
+ * Two rules, and only two:
+ *
+ *   1. A structured tool has a schema. Path operands come from arguments whose
+ *      names say they carry a path. A content or pattern argument is data and
+ *      is never a path source, however much it looks like one.
+ *   2. A shell tool's payload is a command line. Operands come from a
+ *      quote-aware tokenizer, so flags, assignments, URLs and non-path words
+ *      are not mistaken for locations.
+ *
+ * A tool with no usable schema falls back to the older conservative scan. That
+ * fallback is deliberate: an unclassifiable tool must still be protected.
+ */
+
+/** Tools whose input is a command line rather than a structured payload. */
+const SHELL_TOOLS: ReadonlySet<string> = new Set([
+  "bash",
+  "sh",
+  "shell",
+  "zsh",
+  "powershell",
+  "pwsh",
+  "cmd",
+  "run",
+  "exec",
+  "terminal",
+]);
+
+/** Argument names that carry an actual filesystem path. */
+const PATH_PARAM_NAMES: ReadonlySet<string> = new Set([
+  "path",
+  "filePath",
+  "file_path",
+  "filename",
+  "fileName",
+  "dir",
+  "directory",
+  "cwd",
+  "output",
+  "outputPath",
+  "outDir",
+  "outputDir",
+  "target",
+  "destination",
+  "dest",
+  "baseDir",
+  "root",
+  "from",
+  "to",
+  "source",
+  "sources",
+  "paths",
+  "files",
+]);
+
+/**
+ * Argument names whose value is a command line.
+ *
+ * Only these are scanned for destructive and credential patterns on a
+ * structured tool. A file's content is data: writing text is not running it.
+ */
+export const COMMAND_PARAM_NAMES: ReadonlySet<string> = new Set([
+  "command",
+  "cmd",
+  "script",
+  "shell",
+  "shellCommand",
+  "args",
+  "argv",
+]);
+
+/**
+ * Device nodes, which are not workspace paths.
+ *
+ * These are skipped only when they are the target of a redirection, because
+ * that is the one position where the path names a device rather than a file.
+ * As an ordinary argument they are still real paths and are still checked.
+ */
+const DEVICE_PATHS: ReadonlySet<string> = new Set([
+  "/dev/null",
+  "/dev/zero",
+  "/dev/random",
+  "/dev/urandom",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/stdin",
+  "/dev/tty",
+  "NUL",
+  "nul",
+  "CON",
+  "con",
+  "PRN",
+  "AUX",
+  "COM1",
+  "LPT1",
+]);
+
+const WINDOWS_DRIVE = /^[a-zA-Z]:[\\/]/;
+const VARIABLE_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const PERCENT_ENCODED = /%[0-9A-Fa-f]{2}/;
+
+/** How an operand was discovered. Useful in traces and in operator-facing errors. */
+export type PathOperandKind = "schema" | "shell";
+
+export interface PathOperand {
+  value: string;
+  /** The argument or field the operand came from. */
+  origin: string;
+  kind: PathOperandKind;
+}
+
+export function isShellTool(tool: Pick<ToolDescriptor, "name">): boolean {
+  return SHELL_TOOLS.has(tool.name.toLowerCase());
+}
+
+/** True for device nodes such as the null device and the file-descriptor tree. */
+export function isDevicePath(value: string): boolean {
+  if (DEVICE_PATHS.has(value)) return true;
+  return value.startsWith("/dev/fd/");
+}
+
+/**
+ * Whether a token names a filesystem location.
+ *
+ * This is intentionally permissive for shell operands, because a shell operand
+ * really is an argument rather than prose: `deploy/prod.env` is a path even
+ * though it is also a plausible word. The containment check downstream is what
+ * decides whether resolving it is safe.
+ */
+function looksLikePath(token: string): boolean {
+  if (token === "") return false;
+  if (token.includes("://")) return false;
+  if (token.startsWith("/") || token.startsWith("~")) return true;
+  if (WINDOWS_DRIVE.test(token)) return true;
+  if (token.startsWith("./") || token.startsWith("../")) return true;
+  if (token.startsWith(".\\") || token.startsWith("..\\")) return true;
+  return token.includes("/") || token.includes("\\");
+}
+
+interface ShellToken {
+  text: string;
+  /** True when this token is the target of a redirection, for example after `>`. */
+  redirectTarget: boolean;
+}
+
+function isOperatorChar(char: string): boolean {
+  return char === "|" || char === "&" || char === ";" || char === "<" || char === ">" || char === "(" || char === ")";
+}
+
+/**
+ * Split a command line into tokens, tracking quoting, escaping and
+ * redirection targets.
+ *
+ * This is not a shell. It does not expand variables, globs, aliases or
+ * functions, and it does not try to. It models just enough grammar to tell an
+ * argument from syntax, which is all the boundary needs; the limits are
+ * documented as residual limitations rather than papered over.
+ *
+ * Backslashes are preserved rather than consumed, so a Windows path such as
+ * `C:\Users\dev` survives tokenisation intact. Inside double quotes a
+ * backslash still escapes the characters where a shell would.
+ */
+export function tokenizeShell(command: string): ShellToken[] {
+  const tokens: ShellToken[] = [];
+  let current = "";
+  let started = false;
+  let quote = "";
+  let pendingRedirect = false;
+
+  const push = (): void => {
+    if (!started) return;
+    tokens.push({ text: current, redirectTarget: pendingRedirect });
+    pendingRedirect = false;
+    current = "";
+    started = false;
+  };
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+
+    if (quote !== "") {
+      if (char === "\\" && quote === '"') {
+        const next = index + 1 < command.length ? command[index + 1] : "";
+        if (next === '"' || next === "\\" || next === "$" || next === "`") {
+          current += next;
+          started = true;
+          index += 1;
+          continue;
+        }
+        current += char;
+        started = true;
+        continue;
+      }
+      if (char === quote) {
+        quote = "";
+        continue;
+      }
+      current += char;
+      started = true;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+      continue;
+    }
+
+    if (char === "\\") {
+      current += char;
+      started = true;
+      if (index + 1 < command.length) {
+        current += command[index + 1];
+        index += 1;
+      }
+      continue;
+    }
+
+    if (char === " " || char === "\t" || char === "\n" || char === "\r") {
+      push();
+      continue;
+    }
+
+    if (isOperatorChar(char)) {
+      push();
+      pendingRedirect = char === "<" || char === ">";
+      continue;
+    }
+
+    if (char === "$" && command[index + 1] === "(") {
+      /** Command substitution: the inner text is itself a command line, so it
+       * is scanned as one rather than discarded. */
+      started = true;
+      continue;
+    }
+
+    current += char;
+    started = true;
+  }
+
+  push();
+  return tokens;
+}
+
+function decodeOnce(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function extractFromCommand(command: string, origin: string, into: Map<string, PathOperand>): void {
+  for (const token of tokenizeShell(command)) {
+    const text = token.text.trim();
+    if (text === "") continue;
+    if (VARIABLE_ASSIGNMENT.test(text)) continue;
+    if (text.startsWith("-")) continue;
+    if (text.includes("://")) continue;
+    if (token.redirectTarget && isDevicePath(text)) continue;
+
+    if (looksLikePath(text)) {
+      into.set(text, { value: text, origin, kind: "shell" });
+      continue;
+    }
+
+    /** A token such as %2e%2e%2fsecret.txt hides a traversal. Decoding it
+     * can only ever add a candidate, never remove one, so this fails closed. */
+    const decoded = PERCENT_ENCODED.test(text) ? decodeOnce(text) : text;
+    if (decoded !== text && looksLikePath(decoded)) {
+      into.set(decoded, { value: decoded, origin, kind: "shell" });
+    }
+  }
+}
+
+/** Pull path operands out of a structured payload, by argument name. */
+function collectFromObject(value: unknown, origin: string, depth: number, into: Map<string, PathOperand>): void {
+  if (depth > 4 || value === null || typeof value !== "object") return;
+
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof nested === "string") {
+      if (PATH_PARAM_NAMES.has(key) && nested.trim() !== "") {
+        into.set(nested, { value: nested, origin, kind: "schema" });
+        continue;
+      }
+      if (COMMAND_PARAM_NAMES.has(key)) {
+        extractFromCommand(nested, key, into);
+      }
+      continue;
+    }
+
+    if (Array.isArray(nested)) {
+      if (PATH_PARAM_NAMES.has(key)) {
+        for (const item of nested) {
+          if (typeof item === "string" && item.trim() !== "") {
+            into.set(item, { value: item, origin, kind: "schema" });
+          }
+        }
+      }
+      continue;
+    }
+
+    collectFromObject(nested, origin, depth + 1, into);
+  }
+}
+
+/** Add the decoded form of any percent-encoded operand, for checking as well. */
+function expandEncoded(candidates: readonly string[]): string[] {
+  const expanded = new Set<string>();
+  for (const candidate of candidates) {
+    expanded.add(candidate);
+    if (!PERCENT_ENCODED.test(candidate)) continue;
+    const decoded = decodeOnce(candidate);
+    if (decoded !== candidate) expanded.add(decoded);
+  }
+  return [...expanded];
+}
+
+/**
+ * The path operands of a tool call, and nothing else.
+ *
+ * Containment of these operands is decided by the caller through
+ * `WorkspaceBoundary.checkCandidates`.
+ */
+export function extractToolPathCandidates(
+  tool: Pick<ToolDescriptor, "name" | "inputSchema">,
+  input: unknown,
+): string[] {
+  const found = new Map<string, PathOperand>();
+
+  if (isShellTool(tool)) {
+    if (input !== null && typeof input === "object") {
+      for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+        if (typeof value !== "string") continue;
+        if (key === "cwd" || key === "description") continue;
+        if (PATH_PARAM_NAMES.has(key)) {
+          if (value.trim() !== "") found.set(value, { value, origin: key, kind: "schema" });
+          continue;
+        }
+        extractFromCommand(value, key, found);
+      }
+    }
+    return expandEncoded([...found.keys()]);
+  }
+
+  const schema = tool.inputSchema === null || typeof tool.inputSchema !== "object" ? undefined : tool.inputSchema;
+  const properties = schema === undefined ? undefined : (schema as Record<string, unknown>).properties;
+
+  if (properties !== null && typeof properties === "object") {
+    collectFromObject(input, "schema", 0, found);
+    return expandEncoded([...found.keys()]);
+  }
+
+  /** No schema to reason from: keep the old conservative behaviour rather
+   * than silently deciding that a tool has no paths at all. */
+  return expandEncoded(extractPathCandidates(input));
+}
+
+/**
+ * The text that destructive and credential patterns are matched against.
+ *
+ * For a shell tool the whole payload is command text. For a structured tool
+ * only command-like arguments are. File content is deliberately excluded:
+ * quoting a dangerous command in a document is not running it.
+ */
+export function extractCommandText(tool: Pick<ToolDescriptor, "name">, input: unknown): unknown {
+  if (input === null || typeof input !== "object") return {};
+  if (isShellTool(tool)) return input;
+
+  const scoped: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (COMMAND_PARAM_NAMES.has(key)) scoped[key] = value;
+  }
+  return scoped;
+}

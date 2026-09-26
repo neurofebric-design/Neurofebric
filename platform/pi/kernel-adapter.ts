@@ -5,13 +5,21 @@ import {
   EventBus,
   InMemoryStore,
   ToolRegistry,
+  createArtifact,
   createTask,
+  declaredArtifactReferences,
+  redactString,
   transitionTask,
   validatePlan,
+  skillsForCapabilities,
+  verifyArtifacts,
+  WorkspaceBoundary,
   type ApprovalProvider,
+  type Artifact,
   type Plan,
   type PlanStep,
   type PolicyDecision,
+  type PolicyEngine,
   type SkillDescriptor,
   type Task,
   type TaskStatus,
@@ -25,6 +33,12 @@ export interface KernelAdapterOptions {
   skills?: SkillDescriptor[];
   limits?: RecoveryLimits;
   memory?: InMemoryStore;
+  /**
+   * Workspace boundary used to verify produced artifacts. When absent,
+   * artifacts are still checked for existence and content but not for
+   * containment.
+   */
+  boundary?: WorkspaceBoundary;
 }
 
 export interface ToolCallDecision {
@@ -76,9 +90,15 @@ export class KernelAdapter {
   readonly events = new EventBus();
   readonly tools: ToolRegistry;
   readonly memory: InMemoryStore;
-  readonly policy = new DefaultPolicy();
+  /**
+   * Active policy. Defaults to approval mode so that an unconfigured embedding
+   * keeps the conservative behaviour; a trusted project installs
+   * `TrustedProjectPolicy` explicitly.
+   */
+  policy: PolicyEngine = new DefaultPolicy();
   private readonly skills: SkillDescriptor[];
   private readonly limits: RecoveryLimits;
+  private readonly boundary?: WorkspaceBoundary;
   private task?: Task;
   private plan?: Plan;
   private lastValidation?: ValidationResult;
@@ -92,6 +112,18 @@ export class KernelAdapter {
   private readonly deniedToolCallIds = new Set<string>();
   /** Execution ids whose result has already been observed. */
   private readonly observedExecutionIds = new Set<string>();
+  /** Output references declared at preflight, keyed by Pi toolCallId. */
+  private readonly declaredOutputs = new Map<string, string[]>();
+  /** Artifacts confirmed for this task. */
+  private artifactList: Artifact[] = [];
+  /**
+   * Whether the *current* attempt has an unresolved failure.
+   *
+   * Reset when a new execution round begins, so a failure that recovery has
+   * legitimately retried does not block completion forever, while a failure
+   * inside the current round (for example a sibling execution) still does.
+   */
+  private attemptBlocked = false;
   /** Number of real tool executions bound to this task (drives honest finalisation). */
   private toolExecutionCount = 0;
 
@@ -99,6 +131,7 @@ export class KernelAdapter {
     this.tools = new ToolRegistry();
     this.memory = options.memory ?? new InMemoryStore();
     this.skills = options.skills ?? [];
+    this.boundary = options.boundary;
     this.limits = options.limits ?? {
       maxToolRetries: 2,
       maxStepRetries: 1,
@@ -110,6 +143,39 @@ export class KernelAdapter {
 
   setSkills(skills: SkillDescriptor[]): void {
     this.skills.splice(0, this.skills.length, ...skills);
+  }
+
+  get skills(): SkillDescriptor[] {
+    return [...this.skills];
+  }
+
+  findSkillsByCapabilities(capabilities: string[]): SkillDescriptor[] {
+    return skillsForCapabilities(this.skills, capabilities);
+  }
+
+  /** Install the policy used by preflight. Used to select the trust model. */
+  setPolicy(policy: PolicyEngine): void {
+    this.policy = policy;
+  }
+
+  /**
+   * Record the output references a model-requested tool call declares.
+   *
+   * Called from Pi's `tool_call` preflight, which is the only lifecycle event
+   * that carries the tool input. Whether a call declares artifacts at all is
+   * derived from the tool's `sideEffect` classification, so read-only tools
+   * record no outputs and free-form shell commands are not guessed at.
+   */
+  declareToolOutputs(toolCallId: string, toolName: string, input: unknown): string[] {
+    if (!this.task) throw new Error("No active task");
+    const references = declaredArtifactReferences(this.tools.get(toolName), input);
+    if (references.length > 0) this.declaredOutputs.set(toolCallId, references);
+    return references;
+  }
+
+  /** Artifacts confirmed for the current task. */
+  get artifacts(): Artifact[] {
+    return [...this.artifactList];
   }
 
   registerTools(descriptors: ToolDescriptor[]): void {
@@ -142,6 +208,9 @@ export class KernelAdapter {
     this.knownToolCallIds.clear();
     this.deniedToolCallIds.clear();
     this.observedExecutionIds.clear();
+    this.declaredOutputs.clear();
+    this.artifactList = [];
+    this.attemptBlocked = false;
     this.toolExecutionCount = 0;
     await this.events.emit(event("TASK_CREATED", task.taskId, { objective: task.objective }));
     this.task = transitionTask(this.task, "UNDERSTANDING");
@@ -173,11 +242,15 @@ export class KernelAdapter {
     if (!this.task) throw new Error("No active task");
     // Unknown tools are rejected here, before Pi executes anything.
     const tool = this.tools.get(toolName);
-    const policy = approval ? new DefaultPolicy(approval) : this.policy;
+    // An approval provider must never be able to *replace* the installed trust
+    // model. In TRUSTED_PROJECT mode it is ignored outright, so no caller can
+    // escalate a hard denial by passing an always-approving provider.
+    const trusted = this.policy.mode === "TRUSTED_PROJECT";
+    const policy = !trusted && approval ? new DefaultPolicy(approval) : this.policy;
     const request = { taskId: this.task.taskId, tool, operation, input };
     // Evaluate first so that an approval prompt is traced even when it is granted.
     const required = policy.evaluate(request);
-    const decision = approval ? await policy.evaluateWithApproval(request) : required;
+    const decision = !trusted && approval ? await policy.evaluateWithApproval(request) : required;
 
     if (required.decision === "REQUIRE_APPROVAL") {
       await this.events.emit(event("APPROVAL_REQUIRED", this.task.taskId, { tool: toolName, toolCallId }));
@@ -265,6 +338,9 @@ export class KernelAdapter {
       }
 
       const { plan, step } = this.buildPlanStep(toolName, tool);
+      // A new execution round starts here; previous-round failures have already
+      // been handed to recovery and must not block this round's completion.
+      this.attemptBlocked = false;
       this.plan = plan;
       this.task = {
         ...this.task,
@@ -376,9 +452,42 @@ export class KernelAdapter {
       error: error?.message,
     }));
 
-    const validation: ValidationResult = result.success
-      ? { status: "VALID", validator: "pi-result", message: "Pi returned a successful tool result" }
-      : { status: "INVALID", validator: "pi-result", message: error instanceof Error ? error.message : "Tool failed" };
+    // Verification is not "the tool returned success". When a call declared
+    // outputs, those outputs must actually exist, be readable, be non-empty and
+    // sit inside the workspace. A tool that reports success without producing
+    // its declared artifact is INVALID.
+    const invalidArtifacts = result.artifacts.filter((artifact) => artifact.trust === "INVALID");
+    const unverifiedArtifacts = result.artifacts.filter((artifact) => artifact.trust === "UNVERIFIED");
+
+    let validation: ValidationResult;
+    if (!result.success) {
+      validation = { status: "INVALID", validator: "pi-result", message: redactString(error instanceof Error ? error.message : "Tool failed") };
+    } else if (invalidArtifacts.length > 0) {
+      validation = {
+        status: "INVALID",
+        validator: "artifact-verification",
+        message: `Tool reported success but ${invalidArtifacts.length} declared artifact(s) failed verification: ${invalidArtifacts.map((a) => `${a.reference} (${a.verification?.reason})`).join("; ")}`,
+      };
+      await this.events.emit(event("VALIDATION_FAILED", this.task.taskId, { reason: "declared_artifact_invalid", artifacts: invalidArtifacts.map((a) => a.reference) }));
+    } else if (unverifiedArtifacts.length > 0) {
+      validation = {
+        status: "INCONCLUSIVE",
+        validator: "artifact-verification",
+        message: `Declared artifact(s) could not be verified: ${unverifiedArtifacts.map((a) => `${a.reference} (${a.verification?.reason})`).join("; ")}`,
+      };
+    } else if (result.artifacts.length > 0) {
+      validation = {
+        status: "VALID",
+        validator: "artifact-verification",
+        message: `${result.artifacts.length} declared artifact(s) verified on disk`,
+      };
+    } else {
+      validation = { status: "VALID", validator: "pi-result", message: "Pi returned a successful tool result" };
+    }
+
+    if (validation.status === "INVALID" || validation.status === "INCONCLUSIVE") {
+      this.attemptBlocked = true;
+    }
 
     // Sibling executions from the same assistant message are still in flight;
     // the task stays EXECUTING until the last one settles.
@@ -447,23 +556,67 @@ export class KernelAdapter {
   /**
    * Convenience entry point for the Pi adapter: builds a normalized result from
    * the *bound* execution identity so task/step correlation cannot drift.
+   *
+   * Declared outputs are verified against the filesystem before the result is
+   * accepted. A tool that reports success without actually producing its
+   * declared artifact is INVALID, not VALID.
    */
   async recordToolResult(toolCallId: string, toolName: string, payload: unknown, isError: boolean): Promise<ValidationResult> {
     if (!this.task) throw new Error("No active task");
     const bound = this.activeExecutions.get(toolCallId);
     const now = new Date().toISOString();
+    const taskId = this.task.taskId;
+    const stepId = bound?.stepId ?? this.task.currentStep ?? "unknown";
+    const tool = this.tools.get(toolName);
+
+    const declared = this.declaredOutputs.get(toolCallId) ?? [];
+    const candidates: Artifact[] = declared.map((reference) =>
+      createArtifact({
+        reference,
+        descriptor: tool,
+        taskId,
+        stepId,
+        executionId: toolCallId,
+        origin: "TOOL_DECLARED",
+      }),
+    );
+
+    const report = candidates.length > 0
+      ? await verifyArtifacts(candidates, this.boundary ? { boundary: this.boundary } : {})
+      : { artifacts: [], invalid: [], unverified: [], allVerified: false };
+
+    if (report.artifacts.length > 0) {
+      this.artifactList = [...this.artifactList, ...report.artifacts];
+      for (const artifact of report.artifacts) {
+        await this.events.emit(event(artifact.trust === "INVALID" ? "ARTIFACT_INVALID" : "ARTIFACT_VERIFIED", taskId, {
+          artifactId: artifact.artifactId,
+          reference: artifact.reference,
+          kind: artifact.type,
+          producer: artifact.producer,
+          taskId: artifact.taskId,
+          stepId: artifact.stepId,
+          status: artifact.verification?.status,
+          reason: artifact.verification?.reason,
+          sizeBytes: artifact.verification?.sizeBytes,
+          // A content digest, not a credential. It is emitted so a claim can be
+          // re-checked later; the redactor deliberately leaves digests intact.
+          sha256: artifact.verification?.sha256,
+        }));
+      }
+    }
+
     const result: ToolResult = {
       success: !isError,
       data: isError ? undefined : payload,
       metadata: { toolCallId },
-      artifacts: [],
-      warnings: [],
+      artifacts: report.artifacts,
+      warnings: report.unverified.map((artifact) => `Artifact could not be verified: ${artifact.reference} (${artifact.verification?.reason})`),
       error: isError ? { category: "TOOL_ERROR", message: "Pi reported a tool error", retryable: false } : undefined,
-      provenance: [],
+      provenance: this.provenanceFor(toolName, toolCallId, stepId, declared),
       execution: {
         executionId: toolCallId,
-        taskId: this.task.taskId,
-        stepId: bound?.stepId ?? this.task.currentStep ?? "unknown",
+        taskId,
+        stepId,
         tool: toolName,
         startedAt: bound?.startedAt ?? now,
         endedAt: now,
@@ -471,7 +624,31 @@ export class KernelAdapter {
         retryNumber: 0,
       },
     };
+
+    this.task = { ...this.task, artifacts: [...this.task.artifacts, ...report.artifacts] };
     return this.observeToolResult(result, isError ? new Error("Pi reported a tool error") : undefined);
+  }
+
+  /**
+   * Provenance for an execution: what ran, and which references it touched.
+   *
+   * Only facts are recorded. A reference is listed as an output locator only
+   * when the tool was actually declared to write it, so a read path is never
+   * presented as a produced artifact.
+   */
+  private provenanceFor(toolName: string, toolCallId: string, stepId: string, declared: string[]): ToolResult["provenance"] {
+    const produced = this.tools.get(toolName).sideEffect === "SIDE_EFFECTING";
+    return [{
+      source: toolName,
+      // Provenance strings can carry connection strings or credentials echoed
+      // back by a tool, so they cross the same boundary as everything else.
+      locator: declared.length > 0 ? redactString(declared.join(", ")) : undefined,
+      executionId: toolCallId,
+      artifactIds: produced ? this.artifactList.filter((a) => a.stepId === stepId).map((a) => a.artifactId) : [],
+      evidence: declared.length > 0
+        ? `${declared.length} declared output reference(s) verified against the filesystem`
+        : "no output references declared for this call",
+    }];
   }
 
   /**
@@ -569,6 +746,15 @@ export class KernelAdapter {
       if (this.lastValidation?.status === "INVALID") {
         this.task = transitionTask(this.task, "FAILED");
         await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: "Validation failed" }));
+        return this.task;
+      }
+      // A sibling execution may have failed validation while another was still
+      // in flight. A task whose CURRENT attempt has any unresolved failure is
+      // not complete, regardless of which result happened to settle last.
+      if (this.attemptBlocked) {
+        await this.events.emit(event("TOOL_RESULT_IGNORED", this.task.taskId, { reason: "prior_validation_failed" }));
+        this.task = transitionTask(this.task, "FAILED");
+        await this.events.emit(event("TASK_FAILED", this.task.taskId, { reason: "One or more results in this attempt failed or could not be verified" }));
         return this.task;
       }
       this.task = transitionTask(this.task, "COMPLETED", new Date().toISOString());

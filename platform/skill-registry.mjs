@@ -1,58 +1,50 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  assertResolvableDependencies,
+  assertUniqueSkills,
+  parseSkillDocument,
+} from "./core/skill-metadata.ts";
 
-const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const DEFAULT_SKILL_FILE = "SKILL.md";
 
-function parseFrontmatter(content, filePath) {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  if (!match) {
-    throw new Error(`${filePath}: missing YAML frontmatter`);
-  }
+const NL = String.fromCharCode(10);
 
-  const fields = new Map();
-  for (const line of match[1].split(/\r?\n/)) {
-    const separator = line.indexOf(":");
-    if (separator === -1) continue;
-    const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim();
-    if (key) fields.set(key, value);
-  }
-
-  const name = fields.get("name");
-  const description = fields.get("description");
-  if (!name || !SKILL_NAME.test(name)) {
-    throw new Error(`${filePath}: name must be lowercase kebab-case`);
-  }
-  if (!description) {
-    throw new Error(`${filePath}: description is required`);
-  }
-
-  return { name, description, path: filePath };
-}
-
-export async function discoverSkills(skillsRoot) {
+export async function discoverSkills(skillsRoot, options = {}) {
   const entries = await readdir(skillsRoot, { withFileTypes: true });
   const skills = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const skillFile = path.join(skillsRoot, entry.name, "SKILL.md");
+    const skillFile = path.join(skillsRoot, entry.name, DEFAULT_SKILL_FILE);
     try {
       const content = await readFile(skillFile, "utf8");
-      const skill = parseFrontmatter(content, skillFile);
-      if (skill.name !== entry.name) {
-        throw new Error(`${skillFile}: name must match directory '${entry.name}'`);
-      }
-      skills.push(skill);
+      skills.push(parseSkillDocument(content, {
+        filePath: skillFile,
+        directoryName: entry.name,
+        knownTools: options.knownTools,
+      }));
     } catch (error) {
-      if (error?.code === "ENOENT") continue;
+      if (error && error.code === "ENOENT") continue;
       throw error;
     }
   }
 
-  return skills.sort((left, right) => left.name.localeCompare(right.name));
+  skills.sort((left, right) => left.name.localeCompare(right.name));
+  assertUniqueSkills(skills);
+  assertResolvableDependencies(skills);
+  return skills;
 }
 
 export function formatSkillCatalog(skills) {
-  return skills.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n");
+  return skills
+    .map((skill) => {
+      const capabilities = skill.capabilities.length > 0 ? skill.capabilities.join(", ") : "none declared";
+      const tools = skill.requiredTools.length > 0 ? skill.requiredTools.join(", ") : "none required";
+      return "- " + skill.name + " v" + skill.version + " [" + skill.riskLevel + "]"
+        + " capabilities: " + capabilities
+        + " requiredTools: " + tools
+        + ": " + skill.description;
+    })
+    .join(NL);
 }

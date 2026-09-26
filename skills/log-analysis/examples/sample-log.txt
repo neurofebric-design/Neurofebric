@@ -1,0 +1,41 @@
+2024-05-06T09:58:01Z INFO  gateway  gateway started, version 4.2.0, pid 3311
+2024-05-06T09:58:01Z INFO  config   loaded 3 routes from config/routes.yaml
+2024-05-06T09:58:02Z INFO  worker   worker pool initialised, size 4
+2024-05-06T09:58:04Z DEBUG auth     token cache warm, 218 entries
+2024-05-06T09:59:11Z INFO  gateway  request 200 GET /health 18ms
+2024-05-06T10:02:44Z WARN  worker   slow request 812ms GET /api/orders/881
+2024-05-06T10:03:10Z WARN  worker   slow request 1104ms GET /api/orders/882
+2024-05-06T10:05:19Z INFO  gateway  request 200 GET /api/orders/900 22ms
+2024-05-06T10:07:02Z WARN  db       connection pool at 90% (18/20)
+2024-05-06T10:11:20Z INFO  deploy   rollback revision 4.1.7 restored
+2024-05-06T10:12:03Z INFO  gateway  health check ok
+2024-05-06T10:14:01Z WARN  db       connection pool exhausted, waiting 2000ms
+2024-05-06T10:14:02Z WARN  db       connection pool exhausted, waiting 2000ms
+2024-05-06T10:14:03Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:03Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:05Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:05Z ERROR worker-4 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:07Z ERROR worker-2 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:07Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:09Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:11Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:12Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:14Z ERROR worker-1 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:16Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:18Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:14:20Z ERROR gateway  upstream timeout, returning 504 to client
+2024-05-06T10:14:22Z ERROR worker-3 query timeout after 30000ms SELECT orders
+2024-05-06T10:15:01Z WARN  db       connection pool exhausted, waiting 2000ms
+2024-05-06T10:15:30Z INFO  deploy   rollback revision 4.1.7 restored
+2024-05-06T10:16:00Z INFO  deploy   deploying revision 4.2.0
+2024-05-06T10:16:05Z INFO  worker   worker pool initialised, size 4
+2024-05-06T10:16:06Z INFO  db       connection pool reset, size 20
+2024-05-06T10:16:07Z INFO  gateway  health check ok
+2024-05-06T10:16:12Z INFO  gateway  request 200 GET /health 14ms
+2024-05-06T10:16:44Z INFO  gateway  request 200 GET /api/orders/901 19ms
+2024-05-06T10:18:02Z DEBUG auth     token cache warm, 221 entries
+2024-05-06T10:20:00Z INFO  gateway  request 200 GET /api/orders/902 20ms
+2024-05-06T10:24:31Z WARN  worker   slow request 903ms GET /api/orders/903
+2024-05-06T10:31:10Z INFO  worker   nightly compaction finished, 0 rows removed
+2024-05-06T10:45:00Z INFO  gateway  request 200 GET /health 12ms
+2024-05-06T10:52:17Z WARN  worker   slow request 988ms GET /api/orders/904
