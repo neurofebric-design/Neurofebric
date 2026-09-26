@@ -441,5 +441,33 @@ An audit of the 363 OmniRoute upstream models revealed that many prefixes (`aug/
 - **Date:** 2025-09-26
 - **Backup:** `~/.pi/agent/models.json.backup-2026-09-26`
 - **Result:** Pruned 363 models down to 1 (`auto/gemini`).
-- **Persistence Verification:** Post-prune launch confirms count remains 1; the extension does NOT regenerate the full list.
+### Addendum: Stream-Death Failure Mode & Benchmark Runner Retry Rule
+
+- **Date:** 2026-09-26
+- **Observation:** Upstream stream death ("Stream ended without finish_reason") observed on `auto/gemini` during long runner sessions, triggering the F-000 zombie-session incident.
+- **Decision:** The platform kernel fails closed on stream death (transitions task directly to `FAILED` with explicit stream error reason) and intentionally does **not** self-heal stream interruptions. Consequently, the Phase 2 benchmark runner MUST implement retry-with-exponential-backoff for stream-death flakiness.
+
+
+---
+
+## D-004: Verification-phase-only raise of `maxFileWritesPerTask` (10 -> 50)
+
+- **Date:** 2025-09-26
+- **Status:** accepted (temporary verification override)
+- **Affects:** gauntlet construction and Step 2 incremental result-recording
+
+### Context
+
+During the construction phase of the Verification Gauntlet (Step 1), the strict default file write budget (`maxFileWritesPerTask = 10`) was exhausted twice (F-001) while bootstrapping scenarios A through H and their supporting fixtures, task files, and expected pass criteria. Furthermore, Step 2 execution requires incremental recording of session results, telemetry, and metrics reports across 8 scenarios, which exceeds 12-20 file writes.
+
+### Decision
+
+**The operator has raised `maxFileWritesPerTask` from 10 to 50 exclusively for the duration of the Verification Gauntlet.**
+
+### Rationale
+
+1. **Operational Necessity.** Legitimate batch generation and comprehensive gauntlet fixture creation cannot be artificially compressed below 10 file writes without violating the master generator specification.
+2. **Policy Boundary Integrity.** Policy changes are strictly operator decisions; the agent never edits its own policy configuration. The operator manually updated the policy limit.
+3. **Revert or Recalibrate.** Upon completion of the gauntlet and post-gauntlet analysis, policy limits will be reviewed and recalibrated based on observed write counts.
+
 
