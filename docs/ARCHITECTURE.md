@@ -62,7 +62,25 @@ A skill describes when and why to use a tool. A tool performs the operation.
 
 ### Model/provider layer
 
-Pi's `models.json` should configure compatible providers such as OmniRoute. A provider extension is reserved for authentication, streaming, or discovery that the supported Pi provider APIs cannot represent. The orchestrator must not depend on a particular model ID.
+**OmniRoute is the one canonical provider path.** Pi's `models.json` declares a
+single provider, `omni`, at `http://localhost:20128`, with the
+`omniroute-pi-ext-integration` extension supplying provider metadata. A provider
+extension is reserved for authentication, streaming, or discovery that the
+supported Pi provider APIs cannot represent. The orchestrator must not depend on
+a particular model ID, must not call a provider directly, and must not register
+one.
+
+**Non-default fallback.** `pi-free` (installed twice: `npm:pi-free` and
+`git:github.com/apmantza/pi-free`) and `@billjr99/pi-openai-compat` also
+register providers, at their own third-party endpoints. They are a documented
+escape hatch for a gateway-down run and are **off by default**; they are not a
+supported path and not part of this architecture. Enabling one is an explicit
+operator choice with an egress consequence, and it does not require any change
+to platform code. See [DECISIONS.md](DECISIONS.md) (D-001).
+
+Provider choice is therefore a *configuration* concern, held entirely outside
+the platform layer. Nothing in `platform/` or `.pi/extensions/` may read, set,
+or infer a provider.
 
 ### Data-source integrations
 

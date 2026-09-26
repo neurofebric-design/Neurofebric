@@ -49,9 +49,13 @@ From this repository, start Pi with project trust enabled:
 pi --approve
 ```
 
-The project configuration is in `.pi/settings.json`, and the orchestrator extension is in `.pi/extensions/platform-orchestrator.ts`. After changing Pi resources, use `/reload` or restart Pi.
+The project configuration is in `.pi/settings.json`, the Neurofebric trust model is in `.pi/neurofebric.json`, and the orchestrator extension is in `.pi/extensions/platform-orchestrator.ts`. After changing Pi resources, use `/reload` or restart Pi.
 
-Use the command below to inspect the loaded platform resources and recent trace:
+This project runs with `"policyMode": "TRUSTED_PROJECT"`, so ordinary development tool calls — `read`, `bash`, `write`, `edit`, `grep`, `find`, `ls` inside the project — execute without a confirmation prompt. Destructive commands, credential access, and paths outside the project root are denied outright. See [docs/SECURITY.md](docs/SECURITY.md#trust-models). Set `"policyMode": "APPROVAL"` to restore per-operation confirmation.
+
+Project trust is separate and unrelated: it only controls whether project resources load, and is already saved for this directory in `~/.pi/agent/trust.json`, so startup does not prompt.
+
+Use the command below to inspect the loaded platform resources, the active policy mode, and recent trace:
 
 ```text
 /platform
@@ -64,7 +68,10 @@ The first-phase registry tests use Node's built-in test runner:
 ```bash
 node --test platform/*.test.mjs
 node --experimental-strip-types --test platform/core/*.test.ts
+node --experimental-strip-types --test platform/pi/*.test.ts
 ```
+
+The policy and trust-boundary suites are `platform/core/policy.test.ts` (boundary resolution, traversal, symlinks, destructive and secret denial) and `platform/pi/trusted-execution.test.ts` (multi-tool execution with no approval prompt, plus denial enforcement).
 
 The first live kernel path is covered by `platform/pi/kernel-adapter.test.ts` and the domain-neutral smoke test `platform/pi/smoke.test.ts`. The smoke test exercises task creation, planning, plan validation, policy approval, execution observation, validation, provenance, and completion without a real model or credentials.
 
@@ -75,6 +82,35 @@ The older Python implementation remains available under `core/`, `agents/`, `too
 ## Configuration
 
 Pi user configuration is stored under `~/.pi/agent`. Project configuration is stored under `.pi`. Keep credentials in environment variables or Pi's credential store, never in skills, source files, or traces.
+
+## Model provider
+
+**OmniRoute is the one canonical model provider for this project.** Pi reaches it
+through the `omni` provider declared in `~/.pi/agent/models.json` and served by the
+`omniroute-pi-ext-integration` extension, at `http://localhost:20128`. Start the
+gateway with `omniroute` and leave it running before using Pi:
+
+```powershell
+omniroute
+```
+
+The platform orchestrator never makes a model call. Pi owns the agent loop and the
+model call; the orchestrator observes lifecycle events and gates tools. See
+[docs/PI_INTEGRATION.md](docs/PI_INTEGRATION.md).
+
+> **Non-default fallback (not canonical).** `pi-free` and `@billjr99/pi-openai-compat`
+> are installed and register ~25 further third-party providers of their own
+> (`cline`, `llm7`, `zenmux`, `groq`, `kilo`, …). They exist only as an escape hatch
+> for a gateway-down run. They are **off by default** and are not the supported path:
+> using them sends model traffic to third-party endpoints rather than through the local
+> gateway. An audit found recent sessions taking the `cline` path while the docs
+> claimed OmniRoute, which is why the fallback is now explicitly demoted. See
+> [docs/DECISIONS.md](docs/DECISIONS.md) (D-001) for the evidence, the decision, the
+> exact migration commands, and how to verify a call went through OmniRoute.
+
+Credentials belong in Pi's credential store or an environment variable, never in
+`.pi/`, never in `~/.pi/agent/models.json`, and never in a skill, source file, or
+trace.
 
 ## Folder layout
 
