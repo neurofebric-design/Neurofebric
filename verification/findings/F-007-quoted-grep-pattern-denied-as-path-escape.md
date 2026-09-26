@@ -33,3 +33,16 @@ path operands; this shape (quoted, backslash-leading) defeats that heuristic.
 - Per F-003, a boundary violation should deny the call, not terminate the task.
 - Violation messages should carry the full allowed-roots list, the raw token,
   and the rule that produced it.
+
+## Update 2026-09-26 (third instance — non-terminal)
+
+A third reproduction the same day: `tr -cd '\r'` was denied identically (`\r`
+extracted as a rooted path). Unlike the second instance, this denial did NOT
+terminate the task — 20+ tool calls succeeded afterward, and the task later
+died from maxToolCallsPerTask exhaustion (see F-008). Termination following a
+boundary denial is therefore inconsistent across sessions: the first session's
+death was attributed to the denial, but causality is unconfirmed — no
+structured failure reason was available, which is itself the P3a diagnostics
+gap. The extractor false positive is systematic and confirmed x3; the
+termination behavior it triggers is context-dependent and needs re-verification
+with structured traces.
