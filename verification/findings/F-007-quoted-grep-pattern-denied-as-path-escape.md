@@ -36,13 +36,10 @@ path operands; this shape (quoted, backslash-leading) defeats that heuristic.
 
 ## Update 2026-09-26 (third instance — non-terminal)
 
-A third reproduction the same day: `tr -cd '\r'` was denied identically (`\r`
-extracted as a rooted path). Unlike the second instance, this denial did NOT
-terminate the task — 20+ tool calls succeeded afterward, and the task later
-died from maxToolCallsPerTask exhaustion (see F-008). Termination following a
-boundary denial is therefore inconsistent across sessions: the first session's
-death was attributed to the denial, but causality is unconfirmed — no
-structured failure reason was available, which is itself the P3a diagnostics
-gap. The extractor false positive is systematic and confirmed x3; the
-termination behavior it triggers is context-dependent and needs re-verification
-with structured traces.
+
+## Update 2026-09-26 (fourth instance — deliberate reproduction during recon, terminal)
+During read-only recon of the extractor, the agent ran grep commands with backslash-leading tokens while investigating this finding — deliberately reproducing the denial despite the standing rule. Multiple denials were followed immediately by the terminal "Task is FAILED" state. Two upgrades:
+
+Mechanism now confirmed from source, not inference: platform/core/workspace.ts, extractPathCandidates splits scanned strings on /[\s"'()<>]+/ — quotation marks are delimiters, not protection — so a quoted pattern like '.git' yields a bare backslash-leading token that is classified as a path candidate and resolved drive-relative outside the allowed root.
+Codified rules (docs/handoff.md, a614b74) did not prevent the violation. New standing rule: denial reproduction belongs in unit tests, never in live shells.
+Open question (unresolved): PolicyDecision carries ViolationAction block vs abort; which violation classes map to abort, and whether a denial counter exists, is under investigation (explains why one denial was terminal, another was survived by 20+ calls).
