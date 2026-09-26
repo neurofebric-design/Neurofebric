@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "name": "Alpha",
+    "active": true,
+    "email": "alpha@example.com"
+  },
+  {
+    "id": 2,
+    "name": "Beta",
+    "active": false
+  },
+  {
+    "id": 3,
+    "name": "Gamma",
+    "active": true,
+    "email": "gamma@example.com",
+    "extra": "extra_field"
+  }
+]

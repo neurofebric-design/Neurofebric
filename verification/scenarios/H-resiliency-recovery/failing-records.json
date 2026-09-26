@@ -1,0 +1,15 @@
+[
+  {
+    "batchId": 101,
+    "status": "success"
+  },
+  {
+    "batchId": 102,
+    "status": "timeout",
+    "retryable": true
+  },
+  {
+    "batchId": 103,
+    "status": "success"
+  }
+]
