@@ -135,18 +135,50 @@ Note: Gate 1 of the D-001 migration is verified - a real Pi turn pinned to auto/
 - Pattern lists - destructive command patterns and tokens, credential-filename rules, and the write-time credential guardrail - live in the policy file. Token spellings are intentionally omitted from this document, because persisting them is exactly what the write-time guardrail blocks.
 - limits: maxToolCallsPerTask: 40, maxFileWritesPerTask: 10, maxBytesPerWrite: 2000000, onViolation: block.
 
-Platform defaults (platform/core/limits.ts):
+### Kernel limits (as implemented)
+
+Two independent limit surfaces exist. An earlier version of this table named
+`maxFileReadsPerTask`, `maxFileWriteBytes`, and `maxToolExecutionMs`; those
+settings do not exist anywhere in `platform/core` (grep verified 2026-09-26),
+and the write budget was wrongly attributed to `platform/core/limits.ts`.
+
+**Policy limits** — `PolicyLimits` in `platform/core/policy-config.ts`, loaded
+from `.pi/neurofebric-policy.json` and enforced by `ConfiguredPolicy`
+(`platform/core/configured-policy.ts`) before every tool call. If the policy
+file is absent, the fallback `EMPTY_POLICY_LIMITS` is unbounded
+(`Number.MAX_SAFE_INTEGER`): "no policy file" means tier-based policy only,
+not zero limits.
+
+| Setting | Meaning | Committed value |
+| --- | --- | --- |
+| `maxToolCallsPerTask` | tool calls per task, all tiers | 40 |
+| `maxFileWritesPerTask` | write-tier calls per task | 10 |
+| `maxBytesPerWrite` | bytes per write payload | 2,000,000 |
+
+Operator-selected `limitProfiles` (D-007) can override any subset of these for
+a given run via `activeLimitProfile`; the merged values are what enforcement
+sees and what denial messages report.
+
+**Core limits** — `CoreLimits` in `platform/core/limits.ts`, defaults in
+`DEFAULT_LIMITS`, validated by `validateLimits`. These govern kernel execution
+(durations, retries, replans, recovery depth, parallelism, output and artifact
+sizes, context budget) and are independent of the policy file.
 
 | Setting | Default |
-|---|---|
-| maxFileReadsPerTask | 100 |
-| maxFileWritesPerTask | 10 (temporarily 50 for the Verification Gauntlet, see D-006) |
-| maxFileReadBytes | 10 MB |
-| maxFileWriteBytes | 1 MB |
-| maxToolExecutionMs | 30 s |
-| maxRetriesPerStep | 3 |
-| maxReplansPerTask | 3 |
-| contextCompressionThreshold | 0.75 |
+| --- | --- |
+| `maxTaskDurationMs` | 1,800,000 (30 min) |
+| `maxStepDurationMs` | 300,000 (5 min) |
+| `maxToolDurationMs` | 120,000 (2 min) |
+| `maxToolRetries` | 2 |
+| `maxStepRetries` | 1 |
+| `maxReplans` | 2 |
+| `maxRecoveryDepth` | 3 |
+| `maxExecutionTimeMs` | 1,800,000 (30 min) |
+| `maxParallelTasks` | 1 |
+| `maxParallelTools` | 1 |
+| `maxOutputBytes` | 2,097,152 (2 MiB) |
+| `maxArtifactBytes` | 10,485,760 (10 MiB) |
+| `maxContextTokens` | 200,000 |
 
 Provider defaults:
 - Canonical: OmniRoute via omni provider at http://localhost:20128 (omniroute-pi-ext-integration extension).

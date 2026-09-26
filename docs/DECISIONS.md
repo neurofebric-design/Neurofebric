@@ -1,7 +1,7 @@
 # Decision Records
 
 Format: context → decision → rationale → alternatives → consequences →
-migration → verification. Newest first.
+migration → verification. Chronological order — append new decisions at the end.
 
 **This file is the canonical decision log for the project.** The former
 `memory/decisions.md` carried five earlier dated decisions; they were merged into
@@ -453,7 +453,7 @@ An audit of the 363 OmniRoute upstream models revealed that many prefixes (`aug/
 ## D-006: Verification-phase-only raise of `maxFileWritesPerTask` (10 -> 50)
 
 - **Date:** 2026-09-26
-- **Status:** accepted (temporary verification override)
+- **Status:** Superseded (mechanism) by D-007 — the temporary global bump was reverted; per-run overrides now use `limitProfiles`
 - **Affects:** gauntlet construction and Step 2 incremental result-recording
 
 ### Context
@@ -469,5 +469,35 @@ During the construction phase of the Verification Gauntlet (Step 1), the strict 
 1. **Operational Necessity.** Legitimate batch generation and comprehensive gauntlet fixture creation cannot be artificially compressed below 10 file writes without violating the master generator specification.
 2. **Policy Boundary Integrity.** Policy changes are strictly operator decisions; the agent never edits its own policy configuration. The operator manually updated the policy limit.
 3. **Revert or Recalibrate.** Upon completion of the gauntlet and post-gauntlet analysis, policy limits will be reviewed and recalibrated based on observed write counts.
+
+## D-007: Limit profiles replace the global write-budget bump
+
+- **Date:** 2026-09-26
+- **Status:** Accepted
+- **Relates to:** D-004 (operator-only policy changes), D-006 (temporary global bump), F-001 (write-budget saturation), F-005 (policy file inside allowed roots)
+
+D-006 raised `maxFileWritesPerTask` globally (10 → 50) by temporarily editing
+the committed policy file, then reverted it. That pattern trades the
+conservative baseline for throughput on every run, and hand-editing a single
+number is exactly the kind of invisible drift this project keeps catching.
+
+The policy file instead supports operator-defined `limitProfiles` — named
+partial overrides of `limits` — and an `activeLimitProfile` selector
+(`platform/core/policy-config.ts`; commits 5f0b52a and c09be26):
+
+- Profiles merge into `limits` at load time, so enforcement, denial messages,
+  and traces always show effective values. Proven by the policy-port tests:
+  without activation the base budget binds and call #11 is denied at 10; with
+  activation the same call is allowed and call #51 is denied with the merged
+  50 in the message.
+- Validation fails closed: an unknown `activeLimitProfile`, unknown keys,
+  invalid values, or non-kebab-case names are load errors, never silent no-ops.
+- An inactive profile is inert.
+- Selection is operator-only (D-004). At gauntlet start the operator sets
+  `activeLimitProfile`; the committed file keeps the conservative base budget
+  at all other times.
+
+Known residual: the policy file itself sits inside the agent-writable boundary
+(F-005), so D-004 remains a convention rather than an enforced boundary.
 
 
