@@ -4,64 +4,64 @@
 
 ```
 agent-harness/
-â”œâ”€â”€ .pi/
-â”‚   â”œâ”€â”€ extensions/platform-orchestrator.ts
-â”‚   â”œâ”€â”€ neurofebric-policy.json
-â”‚   â”œâ”€â”€ neurofebric.json
-â”‚   â””â”€â”€ settings.json
-â”œâ”€â”€ core/                    # Legacy Python harness internals
-â”œâ”€â”€ agents/                  # Agent definitions
-â”œâ”€â”€ tools/                   # Tool implementations
-â”œâ”€â”€ policies/                # YAML rule files
-â”œâ”€â”€ config/                  # settings.yaml
-â”œâ”€â”€ platform/
-â”‚   â”œâ”€â”€ core/                # Orchestrator core modules
-â”‚   â”œâ”€â”€ pi/                  # Pi kernel integration
-â”‚   â”œâ”€â”€ orchestration.mjs / .test.mjs
-â”‚   â”œâ”€â”€ skill-conformance.test.mjs
-â”‚   â”œâ”€â”€ skill-registry.mjs / .test.mjs
-â”œâ”€â”€ skills/
-â”‚   â”œâ”€â”€ file-analysis/SKILL.md
-â”‚   â”œâ”€â”€ log-analysis/SKILL.md
-â”‚   â”œâ”€â”€ report-writer/SKILL.md
-â”‚   â”œâ”€â”€ structured-data/SKILL.md
-â”œâ”€â”€ main.py
-â”œâ”€â”€ memory/
-â”œâ”€â”€ OmniRoute/               # Provider extension integration
-â”œâ”€â”€ docs/
-â”œâ”€â”€ reports/                 # All gauntlet results (A-H)
-â”œâ”€â”€ requirements.txt
-â”œâ”€â”€ tests/
-â”œâ”€â”€ verification/
-â”‚   â”œâ”€â”€ findings/
-â”‚   â”œâ”€â”€ fixes/
-â”‚   â”œâ”€â”€ scenarios/
-â””â”€â”€ workspace/
+|-- .pi/
+|   |-- extensions/platform-orchestrator.ts
+|   |-- neurofebric-policy.json
+|   |-- neurofebric.json
+|   `-- settings.json
+|-- core/                    # Legacy Python harness internals
+|-- agents/                  # Agent definitions
+|-- tools/                   # Tool implementations
+|-- policies/                # YAML rule files
+|-- config/                  # settings.yaml
+|-- platform/
+|   |-- core/                # Orchestrator core modules
+|   |-- pi/                  # Pi kernel integration
+|   |-- orchestration.mjs / .test.mjs
+|   |-- skill-conformance.test.mjs
+|   `-- skill-registry.mjs / .test.mjs
+|-- skills/
+|   |-- file-analysis/SKILL.md
+|   |-- log-analysis/SKILL.md
+|   |-- report-writer/SKILL.md
+|   `-- structured-data/SKILL.md
+|-- main.py
+|-- memory/
+|-- OmniRoute/               # Provider extension integration
+|-- docs/
+|-- reports/                 # All gauntlet results (A-H)
+|-- requirements.txt
+|-- tests/
+|-- verification/
+|   |-- findings/
+|   |-- fixes/
+|   `-- scenarios/
+`-- workspace/
 ```
 
 ## 2. Orchestrator Core Contents (platform/core/)
 
-- types.ts â€” Task, Plan, Skill/Tool Descriptors, Artifact, ValidationResult, PolicyDecision
-- workspace.ts â€” Workspace boundary management and path validation
-- tool-paths.ts â€” Path candidate extraction for security checks
-- policy.ts â€” DefaultPolicy and TrustedProjectPolicy engines; destructive-command and credential-access pattern regexes; classifyTrustedOperation
-- policy-config.ts â€” Policy configuration loader
-- redaction.ts â€” Signature and field-based credential/data scrubbing at event bus / persistence / artifact / provenance boundaries
-- configured-policy.ts â€” Policy wrapper
-- tool-registry.ts â€” Tool registration and metadata
-- skill-catalog.ts â€” toSkillDescriptor, skillsForCapabilities, assertUniqueSkills, assertResolvableDependencies
-- skill-metadata.ts â€” parseFrontmatterFields, validateSkillMetadata, parseSkillDocument, SkillMetadataError, frontmatter validation
-- planner.ts / plan.ts â€” PlannerInput, Plan, PlanStep interfaces and state
-- validation.ts â€” Input/output validation
-- limits.ts â€” Resource limits
-- context-memory.ts â€” Context and memory integration
-- recovery.ts â€” Error recovery and retry
-- execution.ts â€” Execution tracking
-- errors.ts â€” CoreError
-- events.ts â€” Event bus
-- state-machine.ts â€” Task status transitions (createTask, transitionTask, canTransition)
-- artifact.ts â€” Artifact creation and integrity verification
-- index.ts â€” Barrel exports
+- types.ts - Task, Plan, Skill/Tool Descriptors, Artifact, ValidationResult, PolicyDecision
+- workspace.ts - Workspace boundary management and path validation
+- tool-paths.ts - Path candidate extraction for security checks
+- policy.ts - DefaultPolicy and TrustedProjectPolicy engines; destructive-command and credential-access pattern regexes; classifyTrustedOperation
+- policy-config.ts - Policy configuration loader
+- redaction.ts - Signature and field-based credential/data scrubbing at event bus / persistence / artifact / provenance boundaries
+- configured-policy.ts - Policy wrapper
+- tool-registry.ts - Tool registration and metadata
+- skill-catalog.ts - toSkillDescriptor, skillsForCapabilities, assertUniqueSkills, assertResolvableDependencies
+- skill-metadata.ts - parseFrontmatterFields, validateSkillMetadata, parseSkillDocument, SkillMetadataError, frontmatter validation
+- planner.ts / plan.ts - PlannerInput, Plan, PlanStep interfaces and state
+- validation.ts - Input/output validation
+- limits.ts - Resource limits
+- context-memory.ts - Context and memory integration
+- recovery.ts - Error recovery and retry
+- execution.ts - Execution tracking
+- errors.ts - CoreError
+- events.ts - Event bus
+- state-machine.ts - Task status transitions (createTask, transitionTask, canTransition)
+- artifact.ts - Artifact creation and integrity verification
+- index.ts - Barrel exports
 
 ## 3. Skill Contract and Loader
 
@@ -93,15 +93,15 @@ Loader logic (skill-catalog.ts + skill-metadata.ts):
 
 From reports/REPORT.md and planning notes:
 
-Priority 1 â€” Adaptive Write-Budget Thresholds:
+Priority 1 - Adaptive Write-Budget Thresholds:
 - Issue: Fixed maxFileWritesPerTask caused halts during gauntlet bootstrap (F-001).
 - Solution: Scope write-budget exemptions or higher burst limits for authorized harness generation scripts.
 
-Priority 2 â€” Resilient Session State Recovery:
+Priority 2 - Resilient Session State Recovery:
 - Issue: Manual reconciliation between parent and child tasks after interruptions.
 - Solution: Auto-snapshot and resume partial gauntlet workflows (checkpointing).
 
-Priority 3 â€” Enhanced Policy Interception Diagnostics:
+Priority 3 - Enhanced Policy Interception Diagnostics:
 - Issue: Generic termination signals for blocked shell redirects.
 - Solution: Structured JSON error payloads for policy violations instead of exit codes.
 
@@ -113,7 +113,7 @@ Long-term roadmap items:
 - Sub-agent spawning for delegated work.
 - Dynamic replanning/adaptation based on execution feedback.
 
-Note: Gate 1 of the D-001 migration is verified â€” a real Pi turn pinned to auto/gemini via OmniRoute completed successfully. Step 2 (fallback provider cleanup) is pending as Gate 2.
+Note: Gate 1 of the D-001 migration is verified - a real Pi turn pinned to auto/gemini via OmniRoute completed successfully. Step 2 (fallback provider cleanup) is pending as Gate 2.
 
 ## 5. Configuration Defaults
 
@@ -129,10 +129,10 @@ Note: Gate 1 of the D-001 migration is verified â€” a real Pi turn pinned t
 { "policyMode": "TRUSTED_PROJECT", "allowedRoots": ["."] }
 ```
 
-.pi/neurofebric-policy.json (key points only â€” see the file for the full policy):
-- deniedTools/allowedTools: [] â€” no name gating; tool risk tier governs.
+.pi/neurofebric-policy.json (key points only - see the file for the full policy):
+- deniedTools/allowedTools: [] - no name gating; tool risk tier governs.
 - fileRules: catch-all allow read+write inside roots.
-- Pattern lists â€” destructive command patterns and tokens, credential-filename rules, and the write-time credential guardrail â€” live in the policy file. Token spellings are intentionally omitted from this document, because persisting them is exactly what the write-time guardrail blocks.
+- Pattern lists - destructive command patterns and tokens, credential-filename rules, and the write-time credential guardrail - live in the policy file. Token spellings are intentionally omitted from this document, because persisting them is exactly what the write-time guardrail blocks.
 - limits: maxToolCallsPerTask: 40, maxFileWritesPerTask: 10, maxBytesPerWrite: 2000000, onViolation: block.
 
 Platform defaults (platform/core/limits.ts):
@@ -159,3 +159,4 @@ Policy mode (TRUSTED_PROJECT vs APPROVAL):
 
 ---
 *End of handoff document. Intended for external reviewer consumption.*
+
