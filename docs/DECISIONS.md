@@ -3,6 +3,73 @@
 Format: context → decision → rationale → alternatives → consequences →
 migration → verification. Newest first.
 
+**This file is the canonical decision log for the project.** The former
+`memory/decisions.md` carried five earlier dated decisions; they were merged into
+D-000 below and that file now only points here. Add new decisions here.
+
+---
+
+## D-000: Trust model, artifacts, and redaction (merged from `memory/decisions.md`)
+
+- **Date:** 2025-09-24 / 2025-09-25
+- **Status:** accepted
+- **Affects:** trust model, task completion, artifact trust, trace contents
+- **Source:** merged verbatim in substance from the five entries that previously
+  lived in `memory/decisions.md`, so that one file is the decision log.
+
+### Context
+
+Five decisions were recorded incrementally while the kernel was being built, and
+their reasoning is load-bearing for reading the current code. They are collected
+here so the reasoning is not lost when the old file is reduced to a pointer.
+
+### Decisions
+
+1. **2026-09-24 — Keep Pi as the single general-purpose agent runtime.** The
+   platform is a thin orchestration layer around Pi, never a second agent loop,
+   LLM client, or filesystem toolset.
+2. **2026-09-24 — Start with file, log, CSV, JSON, and report-generation skills.**
+   Database, Splunk, vector memory, and multi-agent components stay deferred
+   until the local file-and-shell workflow is verified.
+3. **2026-09-25 — Project trust and tool approval are separate concerns.** Pi
+   project trust never gates a tool call, so the repeated confirmation prompt
+   came from the orchestrator, not from Pi's trust model. Fixed by a
+   `TRUSTED_PROJECT` policy mode that resolves to `ALLOW` or `DENY` and has no
+   code path to a dialog.
+4. **2026-09-25 — `TRUSTED_PROJECT` is a fail-closed boundary, not a relaxed
+   one.** Dangerous operations are denied outright rather than prompted, so a
+   hostile or mistaken request fails immediately and visibly instead of stalling
+   the run. Denials are reported to the model with a reason.
+5. **2026-09-25 — Model completion is not task completion.** Artifacts are
+   first-class and verified on disk before a task may complete; a tool that
+   reports success without producing its declared output is `INVALID`, not
+   `VALID`. Artifact declaration is derived from a tool's `sideEffect`/`riskLevel`
+   classification rather than from tool names, so new and remote/MCP tools need
+   no core changes.
+6. **2026-09-25 — Redaction is centralized and enforced at every boundary.**
+   `platform/core/redaction.ts` is applied at the event bus, the persistence
+   sink, artifact creation, and validation/provenance construction. It is
+   signature- and field-based rather than length-based, so digests and paths
+   survive while credentials do not. Never rely on the model to avoid exposing
+   a secret.
+
+### Consequences
+
+- Decisions 3 and 4 together justify why no approval dialog is constructed in
+  the default configuration, and why `platform/pi/write-approval.test.ts`
+  asserts that a non-interactive run fails closed.
+- Decision 5 is the reason `artifact-flow.test.ts` exists and why a write whose
+  declared output is missing cannot complete a task.
+- Decision 6 is why `redaction.ts` is imported by the event bus, the artifact
+  layer, and the orchestrator. It is load-bearing code, not a convenience.
+
+### Verification
+
+`platform/pi/trusted-execution.test.ts` (trust model),
+`platform/pi/artifact-flow.test.ts` (artifacts and completion), and
+`platform/pi/redaction-boundary.test.ts` (redaction) together pin all of the
+above.
+
 ---
 
 ## D-001: OmniRoute is the one canonical provider path

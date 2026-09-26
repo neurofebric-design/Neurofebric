@@ -1,0 +1,1 @@
+export class SettlementRepository { async commitWithRetry(tx){const o=await this.client.commit(tx); if(o.status==="COMMIT_UNKNOWN"||isRetryable(o.error)) return this.createReplacementTransaction(tx); return o;} }

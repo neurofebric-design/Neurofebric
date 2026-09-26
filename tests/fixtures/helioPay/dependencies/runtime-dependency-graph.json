@@ -1,0 +1,76 @@
+{
+  "nodes": [
+    {
+      "id": "settlement-api"
+    },
+    {
+      "id": "settlement-service"
+    },
+    {
+      "id": "transactional-pg"
+    },
+    {
+      "id": "connection-pooler"
+    },
+    {
+      "id": "postgres-primary"
+    },
+    {
+      "id": "reconciliation-worker"
+    },
+    {
+      "id": "retry-queue"
+    },
+    {
+      "id": "reporting-aggregator"
+    },
+    {
+      "id": "reporting-export"
+    }
+  ],
+  "edges": [
+    {
+      "from": "settlement-api",
+      "to": "settlement-service"
+    },
+    {
+      "from": "settlement-service",
+      "to": "transactional-pg"
+    },
+    {
+      "from": "transactional-pg",
+      "to": "connection-pooler"
+    },
+    {
+      "from": "connection-pooler",
+      "to": "postgres-primary"
+    },
+    {
+      "from": "settlement-service",
+      "to": "reconciliation-worker"
+    },
+    {
+      "from": "reconciliation-worker",
+      "to": "retry-queue"
+    },
+    {
+      "from": "reconciliation-worker",
+      "to": "reporting-aggregator"
+    },
+    {
+      "from": "reporting-aggregator",
+      "to": "reporting-export"
+    },
+    {
+      "from": "reporting-export",
+      "to": "reporting-aggregator"
+    }
+  ],
+  "disabled_edges": [
+    {
+      "from": "settlement-service",
+      "to": "reporting-export",
+      "reason": "disabled"
+    }
+  ]
+}

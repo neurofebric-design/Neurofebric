@@ -1,0 +1,7 @@
+{
+  "sample_time": "2025-02-14T09:28:00Z",
+  "active_connections": 980,
+  "acquisition_failures": 312,
+  "wait_ms": 1840,
+  "stale": true
+}
