@@ -343,3 +343,22 @@ test("the schema-less fallback still scans what it did not consume as a path", (
     `an unconsumed string must still be scanned: ${JSON.stringify(candidates)}`,
   );
 });
+
+test("OI001: grep patterns and tr options are not path operands (F-007)", async () => {
+  const { workspace } = await sandbox();
+  const policy = new TrustedProjectPolicy({ allowedRoots: [workspace] });
+
+  // These should be ALLOWED because they are not path operands
+  expectAllow(policy, bashTool, { command: 'grep -v "\\.git" | wc -l' }, "grep pattern with .git");
+  expectAllow(policy, bashTool, { command: "tr -cd '\\r' < docs/handoff.md | wc -c" }, "tr option with \\r");
+  expectAllow(policy, bashTool, { command: 'grep -v "node_modules" | grep -v "build"' }, "grep control");
+
+  // Fail-closed controls: genuine rooted/traversal escapes must remain denied
+  expectDeny(policy, bashTool, { command: "cat \\Windows\\system32\\config" }, "Windows config escape");
+  expectDeny(policy, bashTool, { command: "cat \\..\\..\\secrets.txt" }, "traversal escape");
+
+  // Fail-closed controls: single-component rooted escapes must also remain denied
+  expectDeny(policy, bashTool, { command: "cat \\Windows" }, "single-component rooted escape");
+  expectDeny(policy, bashTool, { command: "cat \\secrets.txt" }, "rooted file escape");
+});
+
