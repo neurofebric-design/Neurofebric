@@ -85,4 +85,10 @@ The extension binds these adapters to Pi lifecycle events. The kernel remains in
 
 ## Current Limitations
 
-The first live planner derives a one-step plan from the model's observed tool call. It does not yet ask the model for a complete multi-step plan. Structured model-output parsing, durable task storage, full integration tests, and parallel execution remain follow-up work.
+The first live planner derives a one-step plan from the model's observed tool call. It does not yet ask the model for a complete multi-step plan: a task that needs five steps performs five independent one-step rounds, with the kernel validating and binding each in turn. A model-backed planner implementing the existing `Planner` interface would slot in without changing the kernel, and remains the most valuable next step.
+
+Durable task storage is still absent: task state lives in the adapter for the duration of a turn and is observable through the trace, but nothing survives a restart.
+
+Full integration tests against a live model and a live provider are still missing. Everything under `platform/pi/` runs against deterministic fakes; the end-to-end provider path is verified separately and manually (see [DECISIONS.md](DECISIONS.md) D-003).
+
+Parallel *executions* are supported and bounded; parallel *tasks* and sub-agents are not.

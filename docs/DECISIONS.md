@@ -9,6 +9,138 @@ D-000 below and that file now only points here. Add new decisions here.
 
 ---
 
+## D-002: The OmniRoute API key stays in `models.json` as an accepted risk
+
+- **Date:** 2025-09-26
+- **Status:** accepted (deliberately not remediated)
+- **Affects:** model call authentication for every Pi session
+
+### Context
+
+`~/.pi/agent/models.json` stores the `omni` provider key in plaintext. The
+obvious remediation — move it to Pi's credential store (`auth.json`) or an
+environment variable — was investigated and found to break model access for no
+security gain.
+
+### Decision
+
+**The key stays where it is.** It is an accepted, documented risk, mitigated by
+rotation rather than relocation.
+
+### Rationale
+
+1. **Moving it guarantees an outage.** The `omniroute-pi-ext-integration`
+   extension reads the key *only* from `models.json` (`getApiKey()`) and hardcodes
+   `apiKey: provider.apiKey || "omniroute-public"` when registering the provider.
+   With the key removed, every Pi model call would send `omniroute-public`, which
+   was verified to return **401**.
+2. **`auth.json` would not be read.** Pi's own `docs/models.md` lists credential
+   precedence (`--api-key`, then `auth.json`, then `models.json`, then provider
+   environment variables), but that extension supplies an explicit `apiKey` on
+   `registerProvider`, which bypasses credential resolution entirely. Writing the
+   key to `auth.json` would store a secret nothing reads.
+3. **Zero security gain.** `auth.json` and `models.json` live in the same
+   directory, `~/.pi/agent/`, with the same permissions. Pi's documentation treats
+   them identically ("keep `auth.json` and any credential commands private").
+   Relocating between two files in one directory is security theatre.
+4. **The repository is already clean.** The key is present in **0 of 107 tracked
+   files**, so the "no credentials in the repository" rule is already satisfied.
+   The remaining exposure is local disk only.
+
+### Mitigations
+
+- **Rotate periodically.** The exposure is bounded by rotation interval, not by
+  file location.
+- **Never in the repository or in traces.** No key material may appear in source,
+  skills, configuration committed to the repository, or the execution trace. The
+  redactor in `platform/core/redaction.ts` is enforced at the event bus, the
+  persistence sink, artifact creation, and provenance construction for exactly
+  this reason.
+
+### Root cause and follow-up
+
+The real problem is **upstream extension design**: a provider extension that
+hardcodes its credential source as `models.json` and cannot read Pi's credential
+store. Tracked as a known issue below. If a future version of the extension
+resolves credentials through Pi, this decision should be revisited immediately —
+at that point the move becomes free.
+
+### Alternatives rejected
+
+- Remove the key and rely on `auth.json`: breaks every model call (point 1).
+- Patch the third-party package: not worth maintaining a local fork of an
+  auto-updating npm dependency for this.
+- Proxy the gateway: adds a component to protect a localhost key.
+
+---
+
+## D-003: D-001 migration is gated, not executed
+
+- **Date:** 2025-09-26
+- **Status:** accepted, gates pending
+- **Affects:** the provider-duplication cleanup described in D-001
+
+### Context
+
+D-001 declares OmniRoute canonical and the pi-free providers a non-default
+fallback. The audit found `pi-free` installed twice (npm and git) and recent
+sessions running on `cline`. A raw HTTP probe confirmed the `omni` path works
+(200, `openai/gpt-oss-120b`, ~11.2 s cold), but a raw probe is not the same as a
+real Pi session.
+
+### Decision
+
+Execute the migration in three gates, in order, with an explicit flip condition.
+**Do not perform steps 2 and 3 until step 1 has actually been run by the
+operator.**
+
+| Gate | Action | Status |
+| --- | --- | --- |
+| **0** | Remove the duplicate `pi-free` install (the git checkout). Reversible, removes double registration, and does not affect the working provider. | **PENDING — run by operator, then recorded here as done** |
+| **1** | One real headless Pi turn pinned to the `omni` provider, completing a small real task. | Pending |
+| **2** | Full removal of the remaining fallbacks and the openai-compat package. | Pending, blocked on Gate 1 |
+
+### Flip condition
+
+**If Gate 1 fails** — a real Pi turn on `omni` errors, hangs, or the session
+trace does not show `provider=omni` — then **do not proceed to Gate 2**. Flip
+D-001 instead: pi-free becomes the documented canonical path, and the OmniRoute
+default is retired. The reason must be recorded here, because it would mean the
+gateway path is not actually usable in practice despite the raw probe passing.
+
+### Why gated rather than executed
+
+Gate 0 is safe and reversible. Gates 1 and 2 are not: removing the fallbacks
+removes the route recent sessions were actually using. A raw HTTP probe proves
+the gateway authenticates and answers; it does not prove Pi's extension
+registration, model picker, and streaming path all work end to end. The current
+session's provider is the strongest available signal that the fallback path is
+in active use, so it should not be removed before the canonical path is
+demonstrated inside Pi.
+
+---
+
+## D-004: Known issues
+
+- **`/v1/models` is admin-scoped.** The `omni` API key authenticates inference
+  (`POST /v1/chat/completions` returned 200) but is refused on `GET /v1/models`
+  with `401 invalid_api_key`. A missing header yields
+  `401 "Authentication required"`, a rejected one yields
+  `401 "Invalid API key"`, so the header shape is correct and the scope simply
+  differs. **Impact:** the extension's model-*sync* command (`/v1/models` sync
+  and the `/omni setup` flow) cannot authenticate with the user key, so provider
+  metadata may go stale. **Inference is unaffected**, which is what matters for
+  model calls. Not a blocker for D-001; track separately.
+- **Extension credential source.** See D-002: `omniroute-pi-ext-integration`
+  cannot read Pi's credential store, which is the root cause of the accepted
+  plaintext-key risk. Revisit if an upstream release changes this.
+- **Kernel binding contract.** Fixed in the commit "bind execution only on
+  ALLOW": an execution now binds only on `ALLOW`, so an unresolved
+  `REQUIRE_APPROVAL` cannot acquire an execution identity. The extension
+  already blocked non-`ALLOW` decisions; the kernel is now independently safe.
+
+---
+
 ## D-000: Trust model, artifacts, and redaction (merged from `memory/decisions.md`)
 
 - **Date:** 2025-09-24 / 2025-09-25
@@ -187,6 +319,11 @@ It only records trace events, and Pi owns the model call (see
 - The plaintext `apiKey` in `models.json` should move to Pi's credential store.
   The value is deliberately not reproduced in this document, in source, or in
   any trace.
+
+**D-003 gates this migration.** Do not execute the steps below out of order.
+Gate 0 is the only step safe to run now; Gates 1 and 2 are blocked until a real
+Pi turn has been verified on the `omni` provider. See
+[D-003](#d-003-d-001-migration-is-gated-not-executed).
 
 ### Migration steps for the non-canonical path
 
