@@ -286,7 +286,7 @@ test("I3. terminal states refuse new executions", async () => {
 test("J. a task that never calls a tool still completes via a real response lifecycle", async () => {
   const adapter = await newAdapter("just answer");
   assert.equal(adapter.toolExecutionCount, undefined ?? 0);
-  const completed = await adapter.finishTask({ text: "hello" });
+  const completed = await adapter.finishTask({ role: "assistant", content: [{ type: "text", text: "hello" }], stopReason: "stop" });
   assert.equal(completed.status, "COMPLETED");
   assert.equal(completed.currentPlan?.steps[0].stepId, "response");
   assert.ok(types(adapter).includes("RESPONSE_OBSERVED"));

@@ -35,7 +35,7 @@ test("live adapter creates a task, plans a Pi tool call, and completes after val
   assert.equal(planned.task?.status, "EXECUTING");
   const validation = await adapter.observeToolResult(result(task.taskId, adapter.currentTask?.currentStep ?? "unknown"));
   assert.equal(validation.status, "VALID");
-  const completed = await adapter.finishTask({ answer: "done" });
+  const completed = await adapter.finishTask({ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" });
   assert.equal(completed.status, "COMPLETED");
   assert.ok(adapter.recentEvents().some((event) => event.type === "TASK_COMPLETED"));
 });
