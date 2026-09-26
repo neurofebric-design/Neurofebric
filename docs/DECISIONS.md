@@ -436,3 +436,10 @@ An audit of the 363 OmniRoute upstream models revealed that many prefixes (`aug/
 2. **Alternative prefixes are brittle.** `aug/*` upstreams fail with early stream termination, `cfp/*` require headless browser sessions, and other prefixes (`dva`, `cxa`) throw environment or transport errors.
 3. **Reproducibility.** Relying on generic `auto` without pinning can route to different upstreams unpredictably. Explicitly pinning `auto/gemini` ensures deterministic test runs.
 
+### Model Prune
+
+- **Date:** 2025-09-26
+- **Backup:** `~/.pi/agent/models.json.backup-2026-09-26`
+- **Result:** Pruned 363 models down to 1 (`auto/gemini`).
+- **Persistence Verification:** Post-prune launch confirms count remains 1; the extension does NOT regenerate the full list.
+
