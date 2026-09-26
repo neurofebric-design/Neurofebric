@@ -12,6 +12,8 @@ One-strike edits. A failed exact-match edit is never retried with the same oldTe
 A policy denial is never retried. Note it and move on; STOP if it was a required step. Denials have been observed both terminal and non-terminal (F-003, F-007).
 Stay inside the repo. Never read outside the repo root; NEVER modify .pi/neurofebric-policy.json (D-004); no .ps1 files.
 Stop and report on anything unexpected. Do not improvise.
+If the brief contradicts the code, STOP and report. Do not expand scope on your own authority — the operator resolves scope conflicts.
+Quote code in fenced code blocks in reports — inline backticks have been mangled in transport before.
 
 ## 1. Directory Tree
 
